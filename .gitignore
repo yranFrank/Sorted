@@ -1,0 +1,23 @@
+node_modules/
+out/
+
+# Logs and local output
+*.log
+stdout
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# OS/editor clutter
+.DS_Store
+Thumbs.db
+
+# Coverage and caches
+coverage/
+.vite/
+dist/
+
+# Downloaded installers and other local tooling artifacts
+tools/*.exe

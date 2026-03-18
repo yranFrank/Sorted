@@ -1,0 +1,1 @@
+        e('label', null, t.projectName, e('input', { value: draft.projectName, onChange: (event: any) = ...draft, projectName: event.target.value }) })),

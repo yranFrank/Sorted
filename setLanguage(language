@@ -1,0 +1,1 @@
+        e('div', { className: 'row' }, e('strong', null, t.start), e('button', { className: 'ghost', onClick: () = === 'zh' ? 'en' : 'zh') }, language === 'zh' ? 'EN' : 'жпнд')),

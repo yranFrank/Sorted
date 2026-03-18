@@ -1,0 +1,1 @@
+  const importStatements = async () = if (!activeProject) return; const filePaths = await window.bankApp.pickStatementFiles() as string[]; if (filePaths.length === 0) return; await window.bankApp.addStatements({ projectId: activeProject.id, filePaths }); await loadProject(activeProject.id); };

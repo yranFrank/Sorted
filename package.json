@@ -1,0 +1,31 @@
+{
+  "name": "bank-statement-local-software",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline desktop software for bank statement review, classification, and export.",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "set ELECTRON_RUN_AS_NODE=&& electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "set ELECTRON_RUN_AS_NODE=&& electron-vite preview"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "pdfjs-dist": "^5.5.207",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.14.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.4.1",
+    "electron": "^35.1.5",
+    "electron-vite": "^3.1.0",
+    "typescript": "^5.8.2",
+    "vite": "^5.4.14"
+  }
+}

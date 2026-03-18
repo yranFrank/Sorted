@@ -1,0 +1,1 @@
+    const text = textContent.items.map((item: any) = 
