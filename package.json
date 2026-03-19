@@ -7,13 +7,16 @@
   "scripts": {
     "dev": "set ELECTRON_RUN_AS_NODE=&& electron-vite dev",
     "build": "electron-vite build",
-    "preview": "set ELECTRON_RUN_AS_NODE=&& electron-vite preview"
+    "preview": "set ELECTRON_RUN_AS_NODE=&& electron-vite preview",
+    "baseline:check": "node tools/check_baseline.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
     "pdfjs-dist": "^5.5.207",
+    "pdfreader": "^3.0.8",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-pdf": "^10.4.1",
     "react-router-dom": "^6.30.1",
     "xlsx": "^0.18.5"
   },

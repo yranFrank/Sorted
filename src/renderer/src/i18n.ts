@@ -26,7 +26,7 @@ export const copy = {
     statements: "Statements",
     localStorage: "Local SQLite storage is ready.",
     bilingual: "Chinese / English toggle enabled.",
-    baselineNote: "This build is the foundation milestone: shell, persistence, and workflow skeleton."
+    baselineNote: "This build is the baseline-alignment milestone: workflow, persistence, review, and export."
   },
   zh: {
     appTitle: "银行流水本地分析软件",
@@ -53,6 +53,6 @@ export const copy = {
     statements: "对账单",
     localStorage: "本地 SQLite 存储已就绪。",
     bilingual: "已支持中英切换。",
-    baselineNote: "当前版本先完成桌面壳、持久化和工作流骨架。"
+    baselineNote: "当前版本已完成工作流、持久化、复核和导出的基线对齐。"
   }
 } as const;

@@ -5,27 +5,75 @@ import * as XLSX from 'xlsx';
 const expenseCategories = ['Grocery + eating out', 'Insurance', 'Health insurance', 'Transport', 'Bills + council rate', 'Body corp', 'Entertainment', 'Medical', 'Cloth + shopping', 'Internet / phone', 'Education', 'Other (Raise concern)'];
 const incomeCategories = ['PAYG income', 'Cash deposit', 'Interest income'];
 
+function monthKey(value: string | null | undefined) {
+  if (!value) { return 'Unknown'; }
+  const match = value.match(/^(\d{2})\/(\d{2})\/(\d{2,4})$/);
+  if (!match) { return 'Unknown'; }
+  const year = match[3].length === 2 ? '20' + match[3] : match[3];
+  return year + '-' + match[2];
+}
+
+function groupTotals(rows: any[], categories: string[]) {
+  return categories.map((category) => {
+    const total = rows.filter((item) => item.category === category).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    return { category, total };
+  });
+}
+
+function adjustmentMap(adjustments: any[]) {
+  const map = new Map<string, any>();
+  for (const item of adjustments) {
+    map.set([item.scope_type, item.scope_month || '', item.category].join('::'), item);
+  }
+  return map;
+}
+
 export function exportLivingExpenseWorkbook(data: any) {
   const firstStatement = data.statements[0];
-  const expenseRows = [];
-  expenseRows.push(['Customer name', data.project.customer_name]);
-  expenseRows.push(['Account number', firstStatement ? firstStatement.account_number : '']);
-  expenseRows.push(['Date', firstStatement ? firstStatement.statement_start_date + ' - ' + firstStatement.statement_end_date : '']);
-  expenseRows.push(['Date'].concat(expenseCategories));
-  for (const tx of data.transactions) {
-    if (tx.debit_credit != 'debit') { continue; }
-    const row = [tx.date];
-    for (const category of expenseCategories) { if (tx.category == category) { row.push(tx.amount); } else { row.push(''); } }
-    expenseRows.push(row);
+  const confirmedTransactions = data.transactions.filter((tx: any) => tx.status === 'reviewed');
+  const exportType = data.exportType || 'overall';
+  const exportMonth = data.exportMonth || null;
+  const filteredTransactions = exportType === 'monthly' && exportMonth ? confirmedTransactions.filter((tx: any) => monthKey(tx.date) === exportMonth) : confirmedTransactions;
+  const adjustments = data.adjustments || [];
+  const adjustmentsByKey = adjustmentMap(adjustments);
+  const infoRows = [
+    ['Customer name', data.project.customer_name],
+    ['Project name', data.project.project_name],
+    ['Export mode', exportType],
+    ['Export month', exportMonth || 'All months'],
+    ['Account number', firstStatement ? firstStatement.account_number : ''],
+    ['Bank name', firstStatement ? firstStatement.bank_name : ''],
+    ['Date range', firstStatement ? firstStatement.statement_start_date + ' - ' + firstStatement.statement_end_date : '']
+  ];
+  const transactionRows = [['Date', 'Category', 'Status', 'Amount']];
+  for (const tx of filteredTransactions) {
+    transactionRows.push([tx.date, tx.category, tx.status, tx.amount]);
   }
-  const incomeRows = [];
-  incomeRows.push(['Date', 'Category', 'Amount', 'Description']);
-  for (const tx of data.transactions) { if (tx.debit_credit == 'credit') { incomeRows.push([tx.date, tx.category, tx.amount, tx.description]); } }
+  const summaryRows = [['Scope', 'Direction', 'Category', 'Original total', 'Adjusted total']];
+  const scopes = exportType === 'monthly' ? Array.from(new Set(filteredTransactions.map((item: any) => monthKey(item.date)))) : ['overall'];
+  for (const scope of scopes) {
+    const scopedRows = exportType === 'monthly' ? filteredTransactions.filter((item: any) => monthKey(item.date) === scope) : filteredTransactions;
+    for (const row of groupTotals(scopedRows.filter((item: any) => item.debit_credit === 'debit'), expenseCategories)) {
+      const adjustment = adjustmentsByKey.get([(exportType === 'monthly' ? 'monthly' : 'overall'), exportType === 'monthly' ? scope : '', row.category].join('::'));
+      summaryRows.push([scope, 'expense', row.category, row.total, adjustment ? adjustment.adjusted_total : row.total]);
+    }
+    for (const row of groupTotals(scopedRows.filter((item: any) => item.debit_credit === 'credit'), incomeCategories)) {
+      const adjustment = adjustmentsByKey.get([(exportType === 'monthly' ? 'monthly' : 'overall'), exportType === 'monthly' ? scope : '', row.category].join('::'));
+      summaryRows.push([scope, 'income', row.category, row.total, adjustment ? adjustment.adjusted_total : row.total]);
+    }
+  }
+  const adjustmentRows = [['Scope type', 'Scope month', 'Category', 'Original total', 'Adjusted total', 'Note']];
+  for (const item of adjustments) {
+    adjustmentRows.push([item.scope_type, item.scope_month || '', item.category, item.original_total, item.adjusted_total, item.note || '']);
+  }
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(expenseRows), '90 days transactions');
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(incomeRows), 'Income');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(infoRows), 'Statement Info');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(transactionRows), 'Transactions');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(summaryRows), 'Summary');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(adjustmentRows), 'Adjustments');
   const downloads = app.getPath('downloads');
-  const filePath = path.join(downloads, 'living-expense-export.xlsx');
+  const suffix = exportType === 'monthly' && exportMonth ? '-' + exportMonth : '-overall';
+  const filePath = path.join(downloads, 'living-expense-export' + suffix + '.xlsx');
   XLSX.writeFile(workbook, filePath);
-  return { filePath: filePath, expenseCount: expenseRows.length - 4, incomeCount: incomeRows.length - 1, supportedIncomeCategories: incomeCategories.length };
+  return { filePath: filePath, transactionCount: filteredTransactions.length, exportType: exportType, exportMonth: exportMonth };
 }

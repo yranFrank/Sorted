@@ -41,6 +41,97 @@ export async function extractWestpacLines(filePath: string) {
   return lines;
 }
 
+type BankParserConfig = {
+  name: string;
+  aliases: string[];
+  headingHints: string[];
+  stopPhrases: string[];
+  defaultAccountName: string;
+  metadataLabels: string[];
+};
+
+const bankConfigs: BankParserConfig[] = [
+  {
+    name: 'Westpac',
+    aliases: ['westpac'],
+    headingHints: ['transaction description'],
+    stopPhrases: ['westpac banking corporation', 'please check all entries', 'statement no.', 'transactions'],
+    defaultAccountName: 'Westpac Choice',
+    metadataLabels: ['account name', 'statement period']
+  },
+  {
+    name: 'CBA',
+    aliases: ['commonwealth bank', 'commbank', 'cba'],
+    headingHints: ['description', 'details', 'debit', 'credit'],
+    stopPhrases: ['opening balance', 'closing balance', 'statement summary'],
+    defaultAccountName: 'CBA account',
+    metadataLabels: ['account name', 'account', 'statement period']
+  },
+  {
+    name: 'ANZ',
+    aliases: ['australia and new zealand banking group', 'anz'],
+    headingHints: ['details', 'transaction details', 'withdrawals', 'deposits'],
+    stopPhrases: ['summary of accounts', 'fees summary'],
+    defaultAccountName: 'ANZ account',
+    metadataLabels: ['account name', 'account', 'statement period']
+  },
+  {
+    name: 'NAB',
+    aliases: ['national australia bank', 'nab'],
+    headingHints: ['details', 'transaction details', 'debit', 'credit'],
+    stopPhrases: ['opening balance', 'closing balance', 'fees and charges'],
+    defaultAccountName: 'NAB account',
+    metadataLabels: ['account name', 'account', 'statement period']
+  },
+  {
+    name: 'Bank of Melbourne',
+    aliases: ['bank of melbourne'],
+    headingHints: ['details', 'transaction description'],
+    stopPhrases: ['bank of melbourne'],
+    defaultAccountName: 'Bank of Melbourne account',
+    metadataLabels: ['account name', 'statement period']
+  },
+  {
+    name: 'ING',
+    aliases: ['ing'],
+    headingHints: ['details', 'description'],
+    stopPhrases: ['ing'],
+    defaultAccountName: 'ING account',
+    metadataLabels: ['account name', 'statement period']
+  },
+  {
+    name: 'BOQ',
+    aliases: ['bank of queensland', 'boq'],
+    headingHints: ['details', 'description'],
+    stopPhrases: ['bank of queensland', 'boq'],
+    defaultAccountName: 'BOQ account',
+    metadataLabels: ['account name', 'statement period']
+  }
+];
+
+function detectBank(rawText: string) {
+  const lower = rawText.toLowerCase();
+  for (const config of bankConfigs) {
+    for (const alias of config.aliases) {
+      if (lower.includes(alias)) {
+        return config.name;
+      }
+    }
+  }
+  return 'Unknown bank';
+}
+
+function getBankConfig(bankName: string) {
+  return bankConfigs.find((item) => item.name === bankName) || {
+    name: bankName,
+    aliases: [],
+    headingHints: ['transaction description', 'details', 'description'],
+    stopPhrases: ['statement summary'],
+    defaultAccountName: bankName === 'Unknown bank' ? 'Statement account' : bankName + ' account',
+    metadataLabels: ['account name', 'account', 'statement period']
+  };
+}
+
 export type ParsedTransaction = { date: string; description: string; amount: number; debit_credit: string; balance: number; channel: string; category: string; status: string; raw_text: string; transaction_reference: string };
 export type StatementAnalysis = { filePath: string; pages: number; rawText: string; bankName: string; accountName: string; bsb: string; accountNumber: string; statementStartDate: string; statementEndDate: string; transactions: ParsedTransaction[] };
 
@@ -81,7 +172,7 @@ function inferCategory(description: string, direction: string) {
   if (lower.includes('microsoft')) { return 'Education'; }
   return 'Other (Raise concern)';
 }
-function parseWestpacTransactionLine(raw: string) {
+function parseGenericTransactionLine(raw: string) {
   if (raw.includes('STATEMENT OPENING BALANCE')) { return null; }
   const dateMatch = raw.match(/\d\d\/\d\d\/\d\d/);
   if (!dateMatch) { return null; }
@@ -93,45 +184,65 @@ function parseWestpacTransactionLine(raw: string) {
   const description = raw.slice(dateMatch[0].length, Number(amountMatches[amountMatches.length - 2].index)).trim();
   const direction = inferDirection(description);
   const category = inferCategory(description, direction);
-  return { date: dateMatch[0], description: description, amount: cleanAmount(amountText), debit_credit: direction, balance: cleanAmount(balanceText), channel: inferChannel(description), category: category, status: category == '' ? 'needs_review' : 'reviewed', raw_text: raw, transaction_reference: raw };
+  return { date: dateMatch[0], description: description, amount: cleanAmount(amountText), debit_credit: direction, balance: cleanAmount(balanceText), channel: inferChannel(description), category: category, status: category === '' ? 'needs_review' : 'reviewed', raw_text: raw, transaction_reference: raw };
 }
-export async function analyzeStatement(filePath: string) {
-  const parsed = await parseStatement(filePath);
-  const lines = await extractWestpacLines(filePath);
+
+function extractStatementWindow(lines: string[], bankName: string) {
+  const config = getBankConfig(bankName);
   const transactions: ParsedTransaction[] = [];
   let started = false;
   let current = '';
   for (const line of lines) {
-    if (line.includes('DATE')) {
-      if (line.includes('TRANSACTION DESCRIPTION')) { started = true; continue; }
-    }
-    if (!started) { continue; }
-    if (line.includes('Westpac Banking Corporation')) { continue; }
-    if (line.includes('Please check all entries')) { continue; }
-    if (line.includes('Statement No.')) { continue; }
-    if (line.trim() == 'TRANSACTIONS') { continue; }
-    if (line.match(/\d\d\/\d\d\/\d\d/)) {
-      if (current != '') { const tx = parseWestpacTransactionLine(current); if (tx) { transactions.push(tx); } }
-      current = line;
+    const normalized = line.trim();
+    const lower = normalized.toLowerCase();
+    if (!started && lower.includes('date') && config.headingHints.some((hint) => lower.includes(hint))) {
+      started = true;
       continue;
     }
-    if (current != '') { current = current + ' ' + line; }
+    if (!started) { continue; }
+    if (config.stopPhrases.some((phrase) => lower.includes(phrase))) { continue; }
+    if (normalized.match(/^\d\d\/\d\d\/\d\d/)) {
+      if (current !== '') {
+        const tx = parseGenericTransactionLine(current);
+        if (tx) { transactions.push(tx); }
+      }
+      current = normalized;
+      continue;
+    }
+    if (current !== '') { current = current + ' ' + normalized; }
   }
-  if (current != '') { const tx = parseWestpacTransactionLine(current); if (tx) { transactions.push(tx); } }
+  if (current !== '') {
+    const tx = parseGenericTransactionLine(current);
+    if (tx) { transactions.push(tx); }
+  }
+  return transactions;
+}
+
+function extractMetadata(lines: string[], bankName: string) {
+  const config = getBankConfig(bankName);
   let startDate = '';
   let endDate = '';
-  let accountName = 'Westpac Choice';
+  let accountName = config.defaultAccountName;
   let bsb = '';
   let accountNumber = '';
   for (const line of lines) {
-    const period = line.match(/\d\d\s[A-Za-z]+\s\d\d\d\d\s-\s\d\d\s[A-Za-z]+\s\d\d\d\d/);
+    const period = line.match(/\d\d\s[A-Za-z]+\s\d\d\d\d\s-\s\d\d\s[A-Za-z]+\s\d\d\d\d|\d\d\/\d\d\/\d\d(?:\d\d)?\s-\s\d\d\/\d\d\/\d\d(?:\d\d)?/);
     if (period) { const pieces = period[0].split(' - '); startDate = pieces[0]; endDate = pieces[1]; }
     const bsbMatch = line.match(/\d\d\d-\d\d\d/);
-    const accountMatch = line.match(/\d\d\d\s\d\d\d/);
+    const accountMatch = line.match(/\d\d\d\s\d\d\d|\d{4,12}/);
     if (bsbMatch) { bsb = bsbMatch[0]; }
-    if (accountMatch) { accountNumber = accountMatch[0]; }
+    if (accountMatch && accountNumber === '') { accountNumber = accountMatch[0]; }
+    if (config.metadataLabels.some((label) => line.toLowerCase().includes(label))) { accountName = line.split(':').slice(1).join(':').trim() || accountName; }
   }
-  return { filePath: parsed.filePath, pages: parsed.pages, rawText: parsed.rawText, bankName: 'Westpac', accountName: accountName, bsb: bsb, accountNumber: accountNumber, statementStartDate: startDate, statementEndDate: endDate, transactions: transactions };
+  return { startDate, endDate, accountName, bsb, accountNumber };
+}
+export async function analyzeStatement(filePath: string) {
+  const parsed = await parseStatement(filePath);
+  const lines = await extractWestpacLines(filePath);
+  const bankName = detectBank(parsed.rawText);
+  const transactions = extractStatementWindow(lines, bankName);
+  const metadata = extractMetadata(lines, bankName);
+  return { filePath: parsed.filePath, pages: parsed.pages, rawText: parsed.rawText, bankName: bankName, accountName: metadata.accountName, bsb: metadata.bsb, accountNumber: metadata.accountNumber, statementStartDate: metadata.startDate, statementEndDate: metadata.endDate, transactions: transactions };
 }
 
 

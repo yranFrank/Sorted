@@ -43,6 +43,47 @@ export type RuleRecord = {
   updated_at: string;
 };
 
+export type TransactionRecord = {
+  id: string;
+  statement_id: string;
+  date: string | null;
+  description: string | null;
+  amount: number | null;
+  debit_credit: string | null;
+  balance: number | null;
+  transaction_reference: string | null;
+  channel: string | null;
+  category: string | null;
+  status: string;
+  reviewed_flag: number;
+  raw_text: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AdjustmentRecord = {
+  id: string;
+  project_id: string;
+  category: string;
+  scope_type: string;
+  scope_month: string | null;
+  original_total: number;
+  adjusted_total: number;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ExportHistoryRecord = {
+  id: string;
+  project_id: string;
+  export_type: string;
+  export_month: string | null;
+  file_path: string;
+  exported_at: string;
+  version_label: string | null;
+};
+
 export type CategoryGroup = {
   expense: string[];
   income: string[];
