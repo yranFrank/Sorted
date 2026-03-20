@@ -2,6 +2,50 @@ import { readFile } from 'node:fs/promises';
 
 export type ParserResult = { filePath: string; pages: number; rawText: string };
 
+type PdfTextItem = {
+  str?: string;
+  transform: number[];
+};
+
+type PositionedText = {
+  text: string;
+  x: number;
+};
+
+type PositionedLine = {
+  text: string;
+  cells: PositionedText[];
+};
+
+type ColumnLayout = {
+  debitX: number | null;
+  creditX: number | null;
+  balanceX: number | null;
+};
+
+function buildPageLines(items: PdfTextItem[]): PositionedLine[] {
+  const rows = new Map<string, Array<{ text: string; x: number }>>();
+  for (const item of items) {
+    if (!item.str || item.str.trim() === '') { continue; }
+    const y = String(Math.round(item.transform[5]));
+    if (!rows.has(y)) { rows.set(y, []); }
+    rows.get(y)?.push({ text: item.str, x: item.transform[4] });
+  }
+  return Array.from(rows.entries())
+    .sort(function (a, b) { return Number(b[0]) - Number(a[0]); })
+    .map(function (entry) {
+      const cells = entry[1]
+        .sort(function (a, b) { return a.x - b.x; })
+        .map(function (item) { return { text: item.text.trim(), x: item.x }; })
+        .filter(function (item) { return item.text !== ''; });
+      return {
+        text: cells.map(function (item) { return item.text; }).join(' ').replace(/\s+/g, ' ').trim(),
+        cells
+      };
+    })
+    .filter(function (line) { return line.text !== ''; });
+}
+
 export async function parseStatement(filePath: string) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const data = await readFile(filePath);
@@ -12,15 +56,12 @@ export async function parseStatement(filePath: string) {
   while (pageNumber != document.numPages + 1) {
     const page = await document.getPage(pageNumber);
     const textContent = await page.getTextContent();
-    const parts: string[] = [];
-    for (const item of textContent.items as any[]) {
-      if (item.str) { parts.push(item.str); }
-    }
-    pageTexts.push(parts.join(' '));
+    const pageLines = buildPageLines(textContent.items as PdfTextItem[]);
+    pageTexts.push(`Page ${pageNumber}\n${pageLines.map(function (line) { return line.text; }).join('\n')}`);
     pageNumber += 1;
   }
   await loadingTask.destroy();
-  return { filePath: filePath, pages: document.numPages, rawText: pageTexts.join('\n\n') };
+  return { filePath: filePath, pages: document.numPages, rawText: pageTexts.join('\n\n=== PAGE BREAK ===\n\n') };
 }
 
 export async function extractWestpacLines(filePath: string) {
@@ -32,10 +73,8 @@ export async function extractWestpacLines(filePath: string) {
   while (pageNumber != document.numPages + 1) {
     const page = await document.getPage(pageNumber);
     const textContent = await page.getTextContent();
-    const rows: any = {};
-    for (const item of textContent.items as any[]) { const y = String(Math.round(item.transform[5])); if (!rows[y]) { rows[y] = []; } if (item.str) { rows[y].push(item.str); } }
-    const keys = Object.keys(rows).sort(function (a, b) { return Number(b) - Number(a); });
-    for (const key of keys) { lines.push(rows[key].join(' ')); }
+    const pageLines = buildPageLines(textContent.items as PdfTextItem[]);
+    for (const line of pageLines) { lines.push(line); }
     pageNumber += 1;
   }
   return lines;
@@ -141,7 +180,21 @@ function inferDirection(description: string) {
   if (lower.includes('deposit')) { return 'credit'; }
   if (lower.includes('interest')) { return 'credit'; }
   if (lower.includes('credit')) { return 'credit'; }
-  return 'debit';
+  if (lower.includes('refund')) { return 'credit'; }
+  if (lower.includes('reversal')) { return 'credit'; }
+  if (lower.includes('salary')) { return 'credit'; }
+  if (lower.includes('payroll')) { return 'credit'; }
+  if (lower.includes('wage')) { return 'credit'; }
+  if (lower.includes('pay ')) { return 'credit'; }
+  if (lower.startsWith('pay ')) { return 'credit'; }
+  if (lower.includes('purchase')) { return 'debit'; }
+  if (lower.includes('withdrawal')) { return 'debit'; }
+  if (lower.includes('fee')) { return 'debit'; }
+  if (lower.includes('direct debit')) { return 'debit'; }
+  if (lower.includes('debit card')) { return 'debit'; }
+  if (lower.includes('atm')) { return 'debit'; }
+  if (lower.includes('bill')) { return 'debit'; }
+  return 'unknown';
 }
 function inferChannel(description: string) {
   const lower = description.toLowerCase();
@@ -172,53 +225,107 @@ function inferCategory(description: string, direction: string) {
   if (lower.includes('microsoft')) { return 'Education'; }
   return 'Other (Raise concern)';
 }
-function parseGenericTransactionLine(raw: string) {
-  if (raw.includes('STATEMENT OPENING BALANCE')) { return null; }
-  const dateMatch = raw.match(/\d\d\/\d\d\/\d\d/);
-  if (!dateMatch) { return null; }
-  const amountMatches = Array.from(raw.matchAll(/\d{1,3}(?:,\d{3})*\.\d{2}/g));
-  if (amountMatches.length == 0) { return null; }
-  if (amountMatches.length == 1) { return null; }
-  const balanceText = amountMatches[amountMatches.length - 1][0];
-  const amountText = amountMatches[amountMatches.length - 2][0];
-  const description = raw.slice(dateMatch[0].length, Number(amountMatches[amountMatches.length - 2].index)).trim();
-  const direction = inferDirection(description);
-  const category = inferCategory(description, direction);
-  return { date: dateMatch[0], description: description, amount: cleanAmount(amountText), debit_credit: direction, balance: cleanAmount(balanceText), channel: inferChannel(description), category: category, status: category === '' ? 'needs_review' : 'reviewed', raw_text: raw, transaction_reference: raw };
+
+function detectColumnLayout(line: PositionedLine): ColumnLayout | null {
+  const lowerCells = line.cells.map(function (cell) { return { ...cell, lower: cell.text.toLowerCase() }; });
+  const debit = lowerCells.find(function (cell) { return cell.lower === 'debit'; });
+  const credit = lowerCells.find(function (cell) { return cell.lower === 'credit'; });
+  const balance = lowerCells.find(function (cell) { return cell.lower === 'balance'; });
+  if (!debit && !credit && !balance) { return null; }
+  return {
+    debitX: debit ? debit.x : null,
+    creditX: credit ? credit.x : null,
+    balanceX: balance ? balance.x : null
+  };
 }
 
-function extractStatementWindow(lines: string[], bankName: string) {
+function determineDirectionFromColumns(amountX: number, columns: ColumnLayout | null) {
+  if (!columns) { return null; }
+  const distances = [
+    columns.debitX == null ? null : { direction: 'debit', distance: Math.abs(amountX - columns.debitX) },
+    columns.creditX == null ? null : { direction: 'credit', distance: Math.abs(amountX - columns.creditX) }
+  ].filter(function (item): item is { direction: string; distance: number } { return item !== null; });
+  if (distances.length === 0) { return null; }
+  distances.sort(function (a, b) { return a.distance - b.distance; });
+  return distances[0].distance <= 28 ? distances[0].direction : null;
+}
+
+function parseGenericTransactionLines(lines: PositionedLine[], columns: ColumnLayout | null) {
+  const raw = lines.map(function (line) { return line.text; }).join(' ');
+  if (raw.includes('STATEMENT OPENING BALANCE')) { return null; }
+  const firstLine = lines[0];
+  const dateCell = firstLine.cells.find(function (cell) { return /^\d\d\/\d\d\/\d\d$/.test(cell.text); });
+  if (!dateCell) { return null; }
+  const allCells = lines.flatMap(function (line) { return line.cells; });
+  const amountCells = allCells
+    .filter(function (cell) { return /^\d{1,3}(?:,\d{3})*\.\d{2}$/.test(cell.text); })
+    .map(function (cell) { return { ...cell, value: cleanAmount(cell.text) }; });
+  if (amountCells.length < 2) { return null; }
+
+  let balanceCell = amountCells[amountCells.length - 1];
+  if (columns && columns.balanceX != null) {
+    const matchingBalance = amountCells
+      .slice()
+      .sort(function (a, b) {
+        return Math.abs(a.x - columns.balanceX!) - Math.abs(b.x - columns.balanceX!);
+      })[0];
+    if (matchingBalance && Math.abs(matchingBalance.x - columns.balanceX) <= 28) {
+      balanceCell = matchingBalance;
+    }
+  }
+
+  const valueCells = amountCells.filter(function (cell) {
+    return !(cell.x === balanceCell.x && cell.text === balanceCell.text);
+  });
+  if (valueCells.length === 0) { return null; }
+  const amountCell = valueCells.sort(function (a, b) { return b.x - a.x; })[0];
+
+  const descriptionCells = allCells.filter(function (cell) {
+    return cell.x > dateCell.x && cell.x < amountCell.x && !/^\d{1,3}(?:,\d{3})*\.\d{2}$/.test(cell.text);
+  });
+  const description = descriptionCells.map(function (cell) { return cell.text; }).join(' ').replace(/\s+/g, ' ').trim();
+  if (description === '') { return null; }
+
+  const directionFromColumns = determineDirectionFromColumns(amountCell.x, columns);
+  const direction = directionFromColumns || inferDirection(description);
+  const category = inferCategory(description, direction);
+  return { date: dateCell.text, description: description, amount: amountCell.value, debit_credit: direction, balance: balanceCell.value, channel: inferChannel(description), category: category, status: category === '' ? 'needs_review' : 'reviewed', raw_text: raw, transaction_reference: raw };
+}
+
+function extractStatementWindow(lines: PositionedLine[], bankName: string) {
   const config = getBankConfig(bankName);
   const transactions: ParsedTransaction[] = [];
   let started = false;
-  let current = '';
+  let current: PositionedLine[] = [];
+  let columns: ColumnLayout | null = null;
   for (const line of lines) {
-    const normalized = line.trim();
+    const normalized = line.text.trim();
     const lower = normalized.toLowerCase();
     if (!started && lower.includes('date') && config.headingHints.some((hint) => lower.includes(hint))) {
+      columns = detectColumnLayout(line);
       started = true;
       continue;
     }
     if (!started) { continue; }
     if (config.stopPhrases.some((phrase) => lower.includes(phrase))) { continue; }
     if (normalized.match(/^\d\d\/\d\d\/\d\d/)) {
-      if (current !== '') {
-        const tx = parseGenericTransactionLine(current);
+      if (current.length !== 0) {
+        const tx = parseGenericTransactionLines(current, columns);
         if (tx) { transactions.push(tx); }
       }
-      current = normalized;
+      current = [line];
       continue;
     }
-    if (current !== '') { current = current + ' ' + normalized; }
+    if (current.length !== 0) { current.push(line); }
   }
-  if (current !== '') {
-    const tx = parseGenericTransactionLine(current);
+  if (current.length !== 0) {
+    const tx = parseGenericTransactionLines(current, columns);
     if (tx) { transactions.push(tx); }
   }
   return transactions;
 }
 
-function extractMetadata(lines: string[], bankName: string) {
+function extractMetadata(lines: PositionedLine[], bankName: string) {
   const config = getBankConfig(bankName);
   let startDate = '';
   let endDate = '';
@@ -226,13 +333,14 @@ function extractMetadata(lines: string[], bankName: string) {
   let bsb = '';
   let accountNumber = '';
   for (const line of lines) {
-    const period = line.match(/\d\d\s[A-Za-z]+\s\d\d\d\d\s-\s\d\d\s[A-Za-z]+\s\d\d\d\d|\d\d\/\d\d\/\d\d(?:\d\d)?\s-\s\d\d\/\d\d\/\d\d(?:\d\d)?/);
+    const text = line.text;
+    const period = text.match(/\d\d\s[A-Za-z]+\s\d\d\d\d\s-\s\d\d\s[A-Za-z]+\s\d\d\d\d|\d\d\/\d\d\/\d\d(?:\d\d)?\s-\s\d\d\/\d\d\/\d\d(?:\d\d)?/);
     if (period) { const pieces = period[0].split(' - '); startDate = pieces[0]; endDate = pieces[1]; }
-    const bsbMatch = line.match(/\d\d\d-\d\d\d/);
-    const accountMatch = line.match(/\d\d\d\s\d\d\d|\d{4,12}/);
+    const bsbMatch = text.match(/\d\d\d-\d\d\d/);
+    const accountMatch = text.match(/\d\d\d\s\d\d\d|\d{4,12}/);
     if (bsbMatch) { bsb = bsbMatch[0]; }
     if (accountMatch && accountNumber === '') { accountNumber = accountMatch[0]; }
-    if (config.metadataLabels.some((label) => line.toLowerCase().includes(label))) { accountName = line.split(':').slice(1).join(':').trim() || accountName; }
+    if (config.metadataLabels.some((label) => text.toLowerCase().includes(label))) { accountName = text.split(':').slice(1).join(':').trim() || accountName; }
   }
   return { startDate, endDate, accountName, bsb, accountNumber };
 }

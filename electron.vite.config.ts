@@ -12,6 +12,7 @@ export default defineConfig({
   },
   renderer: {
     plugins: [react()],
+    publicDir: 'src/renderer/public',
     build: { outDir: 'out/renderer' }
   }
 });
