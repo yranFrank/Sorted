@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "./styles.css";
 import { copy, type Language } from "./i18n";
+import { ClassificationPage } from "./pages/ClassificationPage";
+import { SummaryPage } from "./pages/SummaryPage";
 import type {
   AdjustmentRecord,
   ExportHistoryRecord,
@@ -11,6 +13,18 @@ import type {
   StatementRecord,
   TransactionRecord
 } from "./types";
+import {
+  buildCategoryRuleMap,
+  buildSummaryModel,
+  deriveAvailableDateRange,
+  deriveAvailableMonths,
+  isValidRange,
+  rangeLabel,
+  safeNumber,
+  sortTransactionsByDate,
+  totalByDirection,
+  type SummaryMode
+} from "./workspace-selectors";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -65,10 +79,6 @@ function money(value: number) {
   return "$" + value.toFixed(2);
 }
 
-function safeNumber(value: unknown) {
-  return value === undefined || value === null || value === "" ? 0 : Number(value);
-}
-
 function parseStatusLabel(status: string) {
   if (status === "parsed") return "Parsed";
   if (status === "pending") return "Pending";
@@ -88,71 +98,10 @@ function splitRawText(rawText: string) {
     .filter((item) => item !== "");
 }
 
-function unresolvedCount(transactions: TransactionRecord[]) {
-  return transactions.filter((item) => item.status !== "reviewed").length;
-}
-
-function totalByDirection(transactions: TransactionRecord[], direction: string) {
-  return transactions
-    .filter((item) => item.debit_credit === direction)
-    .reduce((sum, item) => sum + safeNumber(item.amount), 0);
-}
-
-function categoryTotals(transactions: TransactionRecord[], categories: string[]) {
-  return categories.map((category) => ({
-    category,
-    total: transactions
-      .filter((item) => item.category === category)
-      .reduce((sum, item) => sum + safeNumber(item.amount), 0)
-  }));
-}
-
-function monthKey(dateValue: string | null) {
-  if (!dateValue) return "Unknown";
-  const match = dateValue.match(/^(\d{2})\/(\d{2})\/(\d{2,4})$/);
-  if (!match) return "Unknown";
-  const year = match[3].length === 2 ? "20" + match[3] : match[3];
-  return year + "-" + match[2];
-}
-
 function directionLabel(direction: string | null) {
   if (direction === "credit") return "Credit";
   if (direction === "debit") return "Debit";
   return "Unknown";
-}
-
-function normalizeDateValue(dateValue: string | null | undefined) {
-  if (!dateValue) return null;
-  const isoMatch = dateValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (isoMatch) return dateValue;
-  const match = dateValue.match(/^(\d{2})\/(\d{2})\/(\d{2,4})$/);
-  if (!match) return null;
-  const year = match[3].length === 2 ? "20" + match[3] : match[3];
-  return `${year}-${match[2]}-${match[1]}`;
-}
-
-function rangeKey(start: string, end: string) {
-  return `${start}..${end}`;
-}
-
-function rangeLabel(start: string, end: string) {
-  return `${start} to ${end}`;
-}
-
-function isValidRange(start: string, end: string) {
-  return start !== "" && end !== "" && start <= end;
-}
-
-function filterTransactionsByRange(
-  transactions: TransactionRecord[],
-  start: string,
-  end: string
-) {
-  if (!isValidRange(start, end)) return [];
-  return transactions.filter((item) => {
-    const normalized = normalizeDateValue(item.date);
-    return normalized !== null && normalized >= start && normalized <= end;
-  });
 }
 
 function shiftIsoDate(dateValue: string, days: number) {
@@ -362,7 +311,8 @@ export default function App(): JSX.Element {
   const [selectedClassifyTransactionId, setSelectedClassifyTransactionId] = useState("");
   const [applyRuleOnCategorySelect, setApplyRuleOnCategorySelect] = useState(false);
   const [highlightMatches, setHighlightMatches] = useState(false);
-  const [summaryMode, setSummaryMode] = useState("overall");
+  const [summaryMode, setSummaryMode] = useState<SummaryMode>("overall");
+  const [summaryMonth, setSummaryMonth] = useState("");
   const [exportMode, setExportMode] = useState("overall");
   const [exportMonth, setExportMonth] = useState("");
   const [summaryDateStart, setSummaryDateStart] = useState("");
@@ -630,12 +580,9 @@ export default function App(): JSX.Element {
 
   const selectedTransactions = useMemo(
     () =>
-      (!selectedId ? [] : workspace.transactions.filter((item) => item.statement_id === selectedId)).slice().sort((a, b) => {
-        const aDate = normalizeDateValue(a.date) || "9999-99-99";
-        const bDate = normalizeDateValue(b.date) || "9999-99-99";
-        if (aDate !== bDate) return aDate.localeCompare(bDate);
-        return a.created_at.localeCompare(b.created_at);
-      }),
+      sortTransactionsByDate(
+        !selectedId ? [] : workspace.transactions.filter((item) => item.statement_id === selectedId)
+      ),
     [workspace.transactions, selectedId]
   );
   const selectedReviewTransaction =
@@ -649,96 +596,45 @@ export default function App(): JSX.Element {
     pendingTransactions[0] ||
     null;
   const confirmedTransactions = workspace.transactions.filter((item) => item.status === "reviewed");
-  const availableMonths = Array.from(
-    new Set(confirmedTransactions.map((item) => monthKey(item.date)).filter((item) => item !== "Unknown"))
+  const availableMonths = useMemo(
+    () => deriveAvailableMonths(confirmedTransactions),
+    [confirmedTransactions]
   );
-  const availableDateRange = useMemo(() => {
-    const normalizedDates = confirmedTransactions
-      .map((item) => normalizeDateValue(item.date))
-      .filter((item): item is string => item !== null)
-      .sort();
-    return {
-      start: normalizedDates[0] || "",
-      end: normalizedDates[normalizedDates.length - 1] || ""
-    };
-  }, [confirmedTransactions]);
-  const summaryCustomTransactions = useMemo(
-    () => filterTransactionsByRange(confirmedTransactions, summaryDateStart, summaryDateEnd),
-    [confirmedTransactions, summaryDateStart, summaryDateEnd]
+  const availableDateRange = useMemo(
+    () => deriveAvailableDateRange(confirmedTransactions),
+    [confirmedTransactions]
   );
-  const summaryScopes = useMemo(
+  const summaryModel = useMemo(
     () =>
-      summaryMode === "monthly"
-        ? availableMonths.map((month) => ({
-            key: month,
-            label: month,
-            transactions: confirmedTransactions.filter((item) => monthKey(item.date) === month)
-          }))
-        : summaryMode === "custom"
-          ? [
-              {
-                key: rangeKey(summaryDateStart, summaryDateEnd),
-                label: isValidRange(summaryDateStart, summaryDateEnd)
-                  ? rangeLabel(summaryDateStart, summaryDateEnd)
-                  : "Select a valid date range",
-                transactions: summaryCustomTransactions
-              }
-            ]
-        : [{ key: "overall", label: "Overall", transactions: confirmedTransactions }],
-    [summaryMode, availableMonths, confirmedTransactions, summaryDateStart, summaryDateEnd, summaryCustomTransactions]
+      buildSummaryModel({
+        mode: summaryMode,
+        selectedMonth: summaryMonth,
+        rangeStart: summaryDateStart,
+        rangeEnd: summaryDateEnd,
+        confirmedTransactions,
+        allTransactions: workspace.transactions,
+        categories: workspace.categories
+      }),
+    [
+      summaryMode,
+      summaryMonth,
+      summaryDateStart,
+      summaryDateEnd,
+      confirmedTransactions,
+      workspace.transactions,
+      workspace.categories
+    ]
   );
-  const summaryRows = useMemo(
-    () =>
-      summaryScopes.map((scope) => ({
-        scopeLabel: scope.label,
-        groups: categoryTotals(
-          scope.transactions.filter((item) => item.debit_credit === "debit"),
-          workspace.categories.expense
-        )
-          .map((row) => ({
-            ...row,
-            direction: "expense",
-            scopeType: summaryMode === "monthly" ? "monthly" : summaryMode === "custom" ? "custom" : "overall",
-            scopeMonth: summaryMode === "overall" ? null : scope.key
-          }))
-          .concat(
-            categoryTotals(
-              scope.transactions.filter((item) => item.debit_credit === "credit"),
-              workspace.categories.income
-            ).map((row) => ({
-              ...row,
-              direction: "income",
-              scopeType: summaryMode === "monthly" ? "monthly" : summaryMode === "custom" ? "custom" : "overall",
-              scopeMonth: summaryMode === "overall" ? null : scope.key
-            }))
-          )
-      })),
-    [summaryScopes, workspace.categories, summaryMode]
-  );
-  const activeSummaryTransactions = useMemo(
-    () =>
-      summaryMode === "monthly"
-        ? confirmedTransactions
-        : summaryMode === "custom"
-          ? summaryCustomTransactions
-          : confirmedTransactions,
-    [summaryMode, confirmedTransactions, summaryCustomTransactions]
-  );
+  const { rows: summaryRows, activeTransactions: activeSummaryTransactions } = summaryModel;
   const selectedNeedles = transactionNeedles(selectedReviewTransaction);
   const parsedTransactionNeedles = useMemo(
     () => transactionCollectionNeedles(selectedTransactions),
     [selectedTransactions]
   );
   const rawBlocks = useMemo(() => splitRawText(selectedAnalysis?.rawText || ""), [selectedAnalysis?.rawText]);
-  const categoryRuleMap = useMemo(() => {
-    const grouped: Record<string, string[]> = {};
-    for (const rule of workspace.rules) {
-      if (!rule.is_enabled) continue;
-      if (!grouped[rule.category]) grouped[rule.category] = [];
-      grouped[rule.category].push(rule.keyword);
-    }
-    return grouped;
-  }, [workspace.rules]);
+  const categoryRuleMap = useMemo(() => buildCategoryRuleMap(workspace.rules), [workspace.rules]);
+  const activeSummaryUnresolved = summaryModel.activeUnresolved;
+  const activeSummaryDateSpan = summaryModel.activeDateSpan;
 
   useEffect(() => {
     if (!selectedReviewTransaction) return;
@@ -769,6 +665,16 @@ export default function App(): JSX.Element {
     if (firstDate !== "" && exportDateStart === "") setExportDateStart(firstDate);
     if (lastDate !== "" && exportDateEnd === "") setExportDateEnd(lastDate);
   }, [availableDateRange, summaryDateStart, summaryDateEnd, exportDateStart, exportDateEnd]);
+
+  useEffect(() => {
+    if (availableMonths.length === 0) {
+      if (summaryMonth !== "") setSummaryMonth("");
+      return;
+    }
+    if (!availableMonths.includes(summaryMonth)) {
+      setSummaryMonth(availableMonths[0]);
+    }
+  }, [availableMonths, summaryMonth]);
 
   function applySummaryRange(start: string, end: string) {
     setSummaryMode("custom");
@@ -1433,420 +1339,75 @@ export default function App(): JSX.Element {
   }
 
   function classifyView() {
-    if (!selectedStatement) {
-      return (
-        <section className="card empty-state">
-          <h3>Select a statement</h3>
-          <p className="muted">Choose a statement before classification.</p>
-        </section>
-      );
-    }
-
     const focusTransaction = selectedClassifyTransaction;
     const focusCategoryOptions =
       focusTransaction?.debit_credit === "credit" ? workspace.categories.income : workspace.categories.expense;
     const focusRuleKeyword =
       (focusTransaction ? (ruleKeywordDrafts[focusTransaction.id] || "").trim() : "") ||
       merchantSearchTerm(focusTransaction);
-
     return (
-      <section className="stack-gap">
-        <div className="card page-banner">
-          <div className="row-wrap">
-            <div>
-              <p className="eyebrow">Step 03</p>
-              <h3>Classification</h3>
-              <p className="muted">Use the left queue, classify in the center, and keep the right archive for reference.</p>
-            </div>
-            <div className="action-inline">
-              <button className="ghost" disabled={pendingTransactions.length === 0} onClick={() => setSelectedClassifyTransactionId(pendingTransactions[0]?.id || "")}>
-                Open Next Pending
-              </button>
-              <button className="primary" disabled={pendingTransactions.length !== 0} onClick={() => setPage("summary")}>
-                Continue to Summary
-              </button>
-            </div>
-          </div>
-          <div className="detail-strip">
-            <div className="detail-cell">
-              <span>Reviewed</span>
-              <strong>{identifiedTransactions.length}</strong>
-            </div>
-            <div className="detail-cell">
-              <span>Needs Review</span>
-              <strong>{pendingTransactions.length}</strong>
-            </div>
-            <div className="detail-cell">
-              <span>Rules</span>
-              <strong>{workspace.rules.length}</strong>
-            </div>
-          </div>
-          {pendingTransactions.length !== 0 ? (
-            <div className="busy-banner">Summary is gated until all transactions are resolved.</div>
-          ) : null}
-        </div>
-
-        <div className="classification-workbench">
-          <section className="card classification-column classification-column-pending">
-            <div className="classification-column-head">
-              <div>
-                <div className="section-kicker">Needs Review</div>
-                <h3>Pending Queue</h3>
-              </div>
-              <span className="status-pill">{pendingTransactions.length}</span>
-            </div>
-            <div className="classification-column-body">
-              {pendingTransactions.length === 0 ? (
-                <div className="empty-state subtle-empty">
-                  <p>No pending transactions.</p>
-                </div>
-              ) : (
-                <div className="classification-ticket-list">
-                  {pendingTransactions.map((item) => (
-                    <button
-                      key={item.id}
-                      className={
-                        "classification-ticket" +
-                        (item.id === focusTransaction?.id ? " classification-ticket-active" : "")
-                      }
-                      onClick={() => setSelectedClassifyTransactionId(item.id)}
-                    >
-                      <div className="classification-ticket-date">{item.date || "Unknown date"}</div>
-                      <div className="classification-ticket-main">
-                        <strong>{item.description}</strong>
-                        <span>{money(safeNumber(item.amount))}</span>
-                      </div>
-                      <div className="classification-ticket-meta">
-                        {directionPill(item.debit_credit)}
-                        <span>{item.category || "Needs category"}</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="card classification-column classification-column-focus">
-            <div className="classification-column-head">
-              <div>
-                <div className="section-kicker">Assign Category</div>
-                <h3>Resolution Desk</h3>
-              </div>
-              <span className="status-pill">{focusTransaction ? "Active" : "Idle"}</span>
-            </div>
-            <div className="classification-column-body classification-center-stack">
-                {focusTransaction ? (
-                  <>
-                    <div className="classification-focus-card">
-                      <span>Selected Transaction</span>
-                      <strong>{focusTransaction.description}</strong>
-                    <div className="classification-focus-meta">
-                      <span>{focusTransaction.date}</span>
-                      {directionPill(focusTransaction.debit_credit)}
-                      </div>
-                      <div className="classification-focus-amount">{money(safeNumber(focusTransaction.amount))}</div>
-                    </div>
-
-                  <div className="classification-action-grid">
-                    {focusCategoryOptions.map((option) => (
-                      <div key={option} className="classification-action-option">
-                        <button
-                          className={
-                            "ghost classification-action-tile" +
-                            (focusTransaction.category === option ? " classification-action-tile-active" : "")
-                          }
-                          onClick={() =>
-                            void classifyTransaction(focusTransaction, option, {
-                              applyRule: applyRuleOnCategorySelect
-                            })
-                          }
-                        >
-                          {option}
-                        </button>
-                        <span className="classification-action-hint">
-                          {categoryRuleMap[option]?.length
-                            ? `(${categoryRuleMap[option].slice(0, 2).join(", ")})`
-                            : "(no rule yet)"}
-                        </span>
-                      </div>
-                    ))}
-                    <div className="classification-action-option">
-                      <button
-                        className="ghost classification-action-tile"
-                        onClick={() => void saveTransactionUpdate(focusTransaction.id, "Transfer", "reviewed")}
-                      >
-                        Transfer
-                      </button>
-                    </div>
-                    <div className="classification-action-option">
-                      <button
-                        className="ghost classification-action-tile"
-                        onClick={() => void saveTransactionUpdate(focusTransaction.id, "Ignored", "reviewed")}
-                      >
-                        Ignore
-                      </button>
-                    </div>
-                  </div>
-
-                  <label className="classification-rule-toggle">
-                    <input
-                      type="checkbox"
-                      checked={applyRuleOnCategorySelect}
-                      onChange={(event) => setApplyRuleOnCategorySelect(event.target.checked)}
-                    />
-                    <span>
-                      Also apply rule to similar
-                    </span>
-                  </label>
-                  {applyRuleOnCategorySelect ? (
-                    <div className="classification-rule-banner">
-                      Rule Created: {focusRuleKeyword || "No keyword available"}
-                    </div>
-                  ) : null}
-
-                  <div className="classification-inline-tools">
-                    <button
-                      className="primary"
-                      onClick={() =>
-                        void saveTransactionUpdate(
-                          focusTransaction.id,
-                          focusTransaction.category || focusCategoryOptions[0] || "Other (Raise concern)",
-                          "reviewed"
-                        )
-                      }
-                    >
-                      Mark Reviewed
-                    </button>
-                    <button className="ghost" onClick={() => void searchTransactionOnGoogle(focusTransaction)}>
-                      Search Merchant
-                    </button>
-                  </div>
-
-                  <div className="classification-inline-tools">
-                    <input
-                      className="inline-input classification-inline-input"
-                      placeholder="Keyword for rule"
-                      value={ruleKeywordDrafts[focusTransaction.id] || ""}
-                      onChange={(event) =>
-                        setRuleKeywordDrafts((previous) => ({ ...previous, [focusTransaction.id]: event.target.value }))
-                      }
-                    />
-                    <button className="ghost" onClick={() => void createRule(focusTransaction)}>
-                      Apply Rule to Similar
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="empty-state subtle-empty">
-                  <p>Everything is classified for this statement.</p>
-                </div>
-              )}
-
-              <div className="classification-toolbox">
-                <div className="section-kicker">Category Tools</div>
-                <input
-                  className="inline-input classification-inline-input"
-                  placeholder="New category name"
-                  value={newCategoryName}
-                  onChange={(event) => setNewCategoryName(event.target.value)}
-                />
-                <div className="classification-inline-tools">
-                  <button className="ghost" disabled={busy !== ""} onClick={() => void createCategory("expense")}>
-                    Add Expense
-                  </button>
-                  <button className="ghost" disabled={busy !== ""} onClick={() => void createCategory("income")}>
-                    Add Income
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="card classification-column classification-column-classified">
-            <div className="classification-column-head">
-              <div>
-                <div className="section-kicker">Classified</div>
-                <h3>Resolved Archive</h3>
-              </div>
-              <span className="status-pill">{identifiedTransactions.length}</span>
-            </div>
-            <div className="classification-column-body">
-              {identifiedTransactions.length === 0 ? (
-                <div className="empty-state subtle-empty">
-                  <p>No classified transactions yet.</p>
-                </div>
-              ) : (
-                <div className="classification-ticket-list">
-                  {identifiedTransactions.map((item) => (
-                    <article key={item.id} className="classification-ticket classification-ticket-complete">
-                      <div className="classification-ticket-date">{item.date || "Unknown date"}</div>
-                      <div className="classification-ticket-main">
-                        <strong>{item.description}</strong>
-                        <span>{money(safeNumber(item.amount))}</span>
-                      </div>
-                      <div className="classification-ticket-meta">
-                        <span>{item.category || "Reviewed"}</span>
-                        {directionPill(item.debit_credit)}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
-      </section>
+      <ClassificationPage
+        selectedStatement={selectedStatement}
+        pendingTransactions={pendingTransactions}
+        identifiedTransactions={identifiedTransactions}
+        focusTransaction={focusTransaction}
+        focusCategoryOptions={focusCategoryOptions}
+        focusRuleKeyword={focusRuleKeyword}
+        workspaceRuleCount={workspace.rules.length}
+        newCategoryName={newCategoryName}
+        busy={busy}
+        applyRuleOnCategorySelect={applyRuleOnCategorySelect}
+        ruleKeywordDrafts={ruleKeywordDrafts}
+        categoryRuleMap={categoryRuleMap}
+        money={money}
+        safeNumber={safeNumber}
+        directionPill={directionPill}
+        setPage={setPage}
+        setSelectedClassifyTransactionId={setSelectedClassifyTransactionId}
+        setApplyRuleOnCategorySelect={setApplyRuleOnCategorySelect}
+        setRuleKeywordDrafts={setRuleKeywordDrafts}
+        setNewCategoryName={setNewCategoryName}
+        classifyTransaction={classifyTransaction}
+        saveTransactionUpdate={saveTransactionUpdate}
+        createRule={createRule}
+        searchTransactionOnGoogle={searchTransactionOnGoogle}
+        createCategory={createCategory}
+      />
     );
   }
 
   function summaryView() {
     return (
-      <section className="stack-gap">
-        <div className="card page-banner">
-          <div className="row-wrap">
-            <div>
-              <p className="eyebrow">Step 04</p>
-              <h3>Summary</h3>
-              <p className="muted">
-                Switch between overall, monthly, and custom date-range views. Confirmed transactions only are included.
-              </p>
-            </div>
-            <div className="action-inline">
-              <button className={summaryMode === "overall" ? "primary" : "ghost"} onClick={() => setSummaryMode("overall")}>
-                Overall
-              </button>
-              <button className={summaryMode === "monthly" ? "primary" : "ghost"} onClick={() => setSummaryMode("monthly")}>
-                Monthly
-              </button>
-              <button className={summaryMode === "custom" ? "primary" : "ghost"} onClick={() => setSummaryMode("custom")}>
-                Date Range
-              </button>
-            </div>
-          </div>
-          {summaryMode === "custom" ? (
-            <>
-              <div className="action-inline">
-                <button
-                  className="ghost"
-                  disabled={availableDateRange.start === "" || availableDateRange.end === ""}
-                  onClick={() => applySummaryRange(availableDateRange.start, availableDateRange.end)}
-                >
-                  Full Span
-                </button>
-                <button
-                  className="ghost"
-                  disabled={availableDateRange.end === ""}
-                  onClick={() => {
-                    const end = availableDateRange.end;
-                    applySummaryRange(shiftIsoDate(end, -29), end);
-                  }}
-                >
-                  Last 30 Days
-                </button>
-                <button
-                  className="ghost"
-                  disabled={!isValidRange(summaryDateStart, summaryDateEnd)}
-                  onClick={syncSummaryRangeToExport}
-                >
-                  Use In Export
-                </button>
-              </div>
-              <div className="export-grid">
-                <label className="form-card">
-                  Start date
-                  <input type="date" value={summaryDateStart} onChange={(event) => setSummaryDateStart(event.target.value)} />
-                </label>
-                <label className="form-card">
-                  End date
-                  <input type="date" value={summaryDateEnd} onChange={(event) => setSummaryDateEnd(event.target.value)} />
-                </label>
-              </div>
-            </>
-          ) : null}
-          <div className="section-kicker">Financial Snapshot</div>
-          <div className="stats-grid">
-            <div className="card metric-card"><span>Statements</span><strong>{workspace.statements.length}</strong></div>
-            <div className="card metric-card"><span>Transactions</span><strong>{activeSummaryTransactions.length}</strong></div>
-            <div className="card metric-card"><span>Expense</span><strong>{money(totalByDirection(activeSummaryTransactions, "debit"))}</strong></div>
-            <div className="card metric-card"><span>Income</span><strong>{money(totalByDirection(activeSummaryTransactions, "credit"))}</strong></div>
-            <div className="card metric-card"><span>Unresolved</span><strong>{unresolvedCount(workspace.transactions)}</strong></div>
-          </div>
-        </div>
-        {summaryMode === "custom" && !isValidRange(summaryDateStart, summaryDateEnd) ? (
-          <div className="busy-banner">Choose a valid start and end date to generate a custom summary.</div>
-        ) : null}
-        {summaryRows.map((scope) => (
-          <div key={scope.scopeLabel} className="card stack-gap">
-            <div className="pane-head">
-              <h3>{scope.scopeLabel}</h3>
-              <span className="status-pill">
-                {summaryMode === "monthly" ? "Monthly" : summaryMode === "custom" ? "Custom" : "Overall"}
-              </span>
-            </div>
-            <div className="summary-grid">
-              {scope.groups.map((group) => {
-                const saved = adjustmentFor(group.category, group.scopeType, group.scopeMonth);
-                const key = adjustmentKey(group.category, group.scopeType, group.scopeMonth);
-                const adjustedValue =
-                  adjustmentDrafts[key]?.adjusted_total ?? String(saved?.adjusted_total ?? group.total);
-                const noteValue = adjustmentDrafts[key]?.note ?? (saved?.note || "");
-                return (
-                  <section key={key} className="card summary-pane">
-                    <div className="pane-head">
-                      <h3>{group.category}</h3>
-                      <span className="status-pill">{group.direction}</span>
-                    </div>
-                    <div className="summary-row">
-                      <span>Original total</span>
-                      <strong>{money(group.total)}</strong>
-                    </div>
-                    <label className="form-card">
-                      Adjusted total
-                      <input
-                        value={adjustedValue}
-                        onChange={(event) =>
-                          setAdjustmentDraft(
-                            group.category,
-                            group.scopeType,
-                            group.scopeMonth,
-                            "adjusted_total",
-                            event.target.value,
-                            group.total
-                          )
-                        }
-                      />
-                    </label>
-                    <label className="form-card">
-                      Adjustment note
-                      <input
-                        value={noteValue}
-                        onChange={(event) =>
-                          setAdjustmentDraft(
-                            group.category,
-                            group.scopeType,
-                            group.scopeMonth,
-                            "note",
-                            event.target.value,
-                            group.total
-                          )
-                        }
-                      />
-                    </label>
-                    <button
-                      className="ghost"
-                      disabled={busy !== ""}
-                      onClick={() => void saveAdjustment(group.category, group.scopeType, group.scopeMonth, group.total)}
-                    >
-                      Save Adjustment
-                    </button>
-                  </section>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </section>
+      <SummaryPage
+        summaryMode={summaryMode}
+        summaryMonth={summaryMonth}
+        availableMonths={availableMonths}
+        availableDateRange={availableDateRange}
+        summaryDateStart={summaryDateStart}
+        summaryDateEnd={summaryDateEnd}
+        workspaceStatementCount={workspace.statements.length}
+        activeSummaryTransactionsLength={activeSummaryTransactions.length}
+        activeSummaryExpense={money(totalByDirection(activeSummaryTransactions, "debit"))}
+        activeSummaryIncome={money(totalByDirection(activeSummaryTransactions, "credit"))}
+        activeSummaryUnresolved={activeSummaryUnresolved}
+        activeSummaryDateSpanLabel={activeSummaryDateSpan.label}
+        summaryRows={summaryRows}
+        busy={busy}
+        isValidRange={isValidRange}
+        applySummaryRange={applySummaryRange}
+        shiftIsoDate={shiftIsoDate}
+        syncSummaryRangeToExport={syncSummaryRangeToExport}
+        setSummaryMode={setSummaryMode}
+        setSummaryMonth={setSummaryMonth}
+        setSummaryDateStart={setSummaryDateStart}
+        setSummaryDateEnd={setSummaryDateEnd}
+        adjustmentFor={adjustmentFor}
+        adjustmentKey={adjustmentKey}
+        adjustmentDrafts={adjustmentDrafts}
+        setAdjustmentDraft={setAdjustmentDraft}
+        saveAdjustment={saveAdjustment}
+        money={money}
+      />
     );
   }
 

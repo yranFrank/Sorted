@@ -45,6 +45,19 @@ function groupTotals(rows: any[], categories: string[]) {
   });
 }
 
+function transactionDateSpan(rows: any[]) {
+  const normalizedDates = rows
+    .map((item) => normalizeDateValue(item.date))
+    .filter((item): item is string => !!item)
+    .sort();
+
+  if (normalizedDates.length === 0) {
+    return 'No dated transactions';
+  }
+
+  return `${normalizedDates[0]} - ${normalizedDates[normalizedDates.length - 1]}`;
+}
+
 function adjustmentMap(adjustments: any[]) {
   const map = new Map<string, any>();
   for (const item of adjustments) {
@@ -80,7 +93,7 @@ export function exportLivingExpenseWorkbook(data: any) {
     ['Export range', exportType === 'custom' && exportRangeStart && exportRangeEnd ? `${exportRangeStart} - ${exportRangeEnd}` : 'All dates'],
     ['Account number', firstStatement ? firstStatement.account_number : ''],
     ['Bank name', firstStatement ? firstStatement.bank_name : ''],
-    ['Date range', firstStatement ? firstStatement.statement_start_date + ' - ' + firstStatement.statement_end_date : '']
+    ['Date range', transactionDateSpan(filteredTransactions)]
   ];
   const transactionRows = [['Date', 'Category', 'Status', 'Amount']];
   for (const tx of filteredTransactions) {

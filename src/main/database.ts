@@ -141,6 +141,16 @@ function migrate(db: Database.Database): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_statements_project_created ON statements(project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_statements_project_start ON statements(project_id, statement_start_date);
+    CREATE INDEX IF NOT EXISTS idx_transactions_statement_date_created ON transactions(statement_id, date, created_at);
+    CREATE INDEX IF NOT EXISTS idx_transactions_statement_status ON transactions(statement_id, status);
+    CREATE INDEX IF NOT EXISTS idx_transactions_statement_reviewed ON transactions(statement_id, reviewed_flag);
+    CREATE INDEX IF NOT EXISTS idx_rules_enabled_priority_keyword ON rules(is_enabled, priority DESC, keyword);
+    CREATE INDEX IF NOT EXISTS idx_adjustments_project_scope_category ON adjustments(project_id, scope_type, scope_month, category);
+    CREATE INDEX IF NOT EXISTS idx_export_history_project_exported ON export_history(project_id, exported_at DESC);
   `);
 }
 
@@ -181,13 +191,23 @@ function seedDefaultRules(db: Database.Database): void {
   transaction();
 }
 
+function normalizeRuleText(value: string | null | undefined): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b\d{2,}\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function matchRule(description: string | null, rules: RuleRecord[]): RuleRecord | null {
-  const lower = (description || "").toLowerCase();
+  const normalizedDescription = normalizeRuleText(description);
   for (const rule of rules) {
     if (!rule.is_enabled) {
       continue;
     }
-    if (lower.includes(rule.keyword.toLowerCase())) {
+    const normalizedKeyword = normalizeRuleText(rule.keyword);
+    if (normalizedKeyword !== "" && normalizedDescription.includes(normalizedKeyword)) {
       return rule;
     }
   }
@@ -212,10 +232,9 @@ function applyRuleSetToTransaction(tx: {
 
 function updateProjectStatusForProject(db: Database.Database, projectId: string, timestamp: string) {
   const unresolved = db.prepare(`
-    SELECT COUNT(*) AS count
-    FROM transactions t
-    INNER JOIN statements s ON s.id = t.statement_id
-    WHERE s.project_id = ? AND t.status != 'reviewed'
+    SELECT COALESCE(SUM(review_count), 0) AS count
+    FROM statements
+    WHERE project_id = ?
   `).get(projectId) as { count: number };
   const statementCount = db.prepare("SELECT COUNT(*) AS count FROM statements WHERE project_id = ?").get(projectId) as { count: number };
   const status = statementCount.count === 0 ? "draft" : unresolved.count === 0 ? "ready_to_export" : "in_review";
@@ -225,18 +244,134 @@ function updateProjectStatusForProject(db: Database.Database, projectId: string,
 function reapplyRulesAcrossTransactions(db: Database.Database) {
   const timestamp = nowIso();
   const rules = listRules();
-  const rows = db.prepare("SELECT id, description, category, status FROM transactions").all() as Array<{ id: string; description: string | null; category: string | null; status: string }>;
+  const rows = db.prepare("SELECT id, statement_id, description, category, status, reviewed_flag FROM transactions").all() as Array<{ id: string; statement_id: string; description: string | null; category: string | null; status: string; reviewed_flag: number }>;
   const update = db.prepare("UPDATE transactions SET category = ?, status = ?, reviewed_flag = ?, updated_at = ? WHERE id = ?");
+  const touchedStatementIds = new Set<string>();
   const tx = db.transaction(() => {
     for (const row of rows) {
       const matchedRule = matchRule(row.description, rules);
       if (!matchedRule) {
         continue;
       }
-      update.run(matchedRule.category, "reviewed", 1, timestamp, row.id);
+      const nextCategory = matchedRule.category;
+      const nextStatus = "reviewed";
+      const nextReviewedFlag = 1;
+      if (row.category === nextCategory && row.status === nextStatus && row.reviewed_flag === nextReviewedFlag) {
+        continue;
+      }
+      update.run(nextCategory, nextStatus, nextReviewedFlag, timestamp, row.id);
+      touchedStatementIds.add(row.statement_id);
     }
   });
   tx();
+  return touchedStatementIds;
+}
+
+function reapplyRulesForCandidateKeywords(
+  db: Database.Database,
+  candidateKeywords: string[],
+  fallbackCategory: string | null,
+  timestamp: string
+) {
+  const normalizedCandidates = Array.from(
+    new Set(candidateKeywords.map((item) => normalizeRuleText(item)).filter((item) => item !== ""))
+  );
+  if (normalizedCandidates.length === 0) {
+    return new Set<string>();
+  }
+
+  const rules = listRules();
+  const rows = db
+    .prepare("SELECT id, statement_id, description, category, status, reviewed_flag FROM transactions")
+    .all() as Array<{
+      id: string;
+      statement_id: string;
+      description: string | null;
+      category: string | null;
+      status: string;
+      reviewed_flag: number;
+    }>;
+
+  const update = db.prepare(
+    "UPDATE transactions SET category = ?, status = ?, reviewed_flag = ?, updated_at = ? WHERE id = ?"
+  );
+  const touchedStatementIds = new Set<string>();
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const normalizedDescription = normalizeRuleText(row.description);
+      const isCandidate = normalizedCandidates.some((keyword) => normalizedDescription.includes(keyword));
+      if (!isCandidate) {
+        continue;
+      }
+
+      const matchedRule = matchRule(row.description, rules);
+      if (matchedRule) {
+        const nextCategory = matchedRule.category;
+        const nextStatus = "reviewed";
+        const nextReviewedFlag = 1;
+        if (row.category === nextCategory && row.status === nextStatus && row.reviewed_flag === nextReviewedFlag) {
+          continue;
+        }
+        update.run(nextCategory, nextStatus, nextReviewedFlag, timestamp, row.id);
+        touchedStatementIds.add(row.statement_id);
+        continue;
+      }
+
+      if (fallbackCategory !== null && row.category === fallbackCategory && row.status === "reviewed") {
+        update.run("Other (Raise concern)", "needs_review", 0, timestamp, row.id);
+        touchedStatementIds.add(row.statement_id);
+      }
+    }
+  });
+
+  tx();
+  return touchedStatementIds;
+}
+
+function refreshStatementReviewCounts(db: Database.Database, statementIds: Iterable<string>, timestamp: string): string[] {
+  const uniqueStatementIds = Array.from(new Set(Array.from(statementIds).filter((item) => item !== "")));
+  if (uniqueStatementIds.length === 0) {
+    return [];
+  }
+
+  const placeholders = uniqueStatementIds.map(() => "?").join(", ");
+  const unresolvedRows = db
+    .prepare(`
+      SELECT statement_id, COUNT(*) AS count
+      FROM transactions
+      WHERE statement_id IN (${placeholders}) AND status != 'reviewed'
+      GROUP BY statement_id
+    `)
+    .all(...uniqueStatementIds) as Array<{ statement_id: string; count: number }>;
+
+  const unresolvedByStatement = new Map(unresolvedRows.map((row) => [row.statement_id, row.count]));
+  const updateStatement = db.prepare("UPDATE statements SET review_count = ?, updated_at = ? WHERE id = ?");
+  for (const statementId of uniqueStatementIds) {
+    updateStatement.run(unresolvedByStatement.get(statementId) || 0, timestamp, statementId);
+  }
+
+  return uniqueStatementIds;
+}
+
+function refreshProjectsForStatements(db: Database.Database, statementIds: Iterable<string>, timestamp: string) {
+  const uniqueStatementIds = Array.from(new Set(Array.from(statementIds).filter((item) => item !== "")));
+  if (uniqueStatementIds.length === 0) {
+    return;
+  }
+
+  const placeholders = uniqueStatementIds.map(() => "?").join(", ");
+  const projectRows = db
+    .prepare(`
+      SELECT DISTINCT project_id
+      FROM statements
+      WHERE id IN (${placeholders})
+    `)
+    .all(...uniqueStatementIds) as Array<{ project_id: string }>;
+
+  for (const row of projectRows) {
+    updateProjectStatusForProject(db, row.project_id, timestamp);
+  }
 }
 
 export function createProject(input: { customerName: string; projectName: string }): ProjectRecord {
@@ -265,12 +400,19 @@ export function listProjects(): DashboardProject[] {
   return db.prepare(`
     SELECT
       p.*,
-      COUNT(DISTINCT s.id) AS statement_count,
-      COALESCE(SUM(CASE WHEN t.status = 'needs_review' THEN 1 ELSE 0 END), 0) AS unresolved_count
+      COALESCE(s.statement_count, 0) AS statement_count,
+      COALESCE(t.unresolved_count, 0) AS unresolved_count
     FROM projects p
-    LEFT JOIN statements s ON s.project_id = p.id
-    LEFT JOIN transactions t ON t.statement_id = s.id
-    GROUP BY p.id
+    LEFT JOIN (
+      SELECT project_id, COUNT(*) AS statement_count
+      FROM statements
+      GROUP BY project_id
+    ) s ON s.project_id = p.id
+    LEFT JOIN (
+      SELECT project_id, COALESCE(SUM(review_count), 0) AS unresolved_count
+      FROM statements
+      GROUP BY project_id
+    ) t ON t.project_id = p.id
     ORDER BY p.updated_at DESC
   `).all() as DashboardProject[];
 }
@@ -520,7 +662,7 @@ export function createRule(input: { keyword: string; category: string; match_typ
   const timestamp = nowIso();
   const rule: RuleRecord = {
     id: randomUUID(),
-    keyword: input.keyword.trim(),
+    keyword: normalizeRuleText(input.keyword),
     category: input.category.trim(),
     match_type: input.match_type,
     priority: input.priority ?? 100,
@@ -532,31 +674,46 @@ export function createRule(input: { keyword: string; category: string; match_typ
     INSERT INTO rules (id, keyword, category, match_type, priority, is_enabled, created_at, updated_at)
     VALUES (@id, @keyword, @category, @match_type, @priority, @is_enabled, @created_at, @updated_at)
   `).run(rule);
-  reapplyRulesAcrossTransactions(db);
+  const touchedStatementIds = reapplyRulesAcrossTransactions(db);
+  refreshStatementReviewCounts(db, touchedStatementIds, timestamp);
+  refreshProjectsForStatements(db, touchedStatementIds, timestamp);
   return rule;
 }
 
 export function updateRule(input: { id: string; keyword: string; category: string; is_enabled: number }) {
   const db = getDatabase();
   const timestamp = nowIso();
+  const previous = db.prepare("SELECT * FROM rules WHERE id = ?").get(input.id) as RuleRecord | undefined;
   db.prepare(`
     UPDATE rules
     SET keyword = ?, category = ?, is_enabled = ?, updated_at = ?
     WHERE id = ?
-  `).run(input.keyword.trim(), input.category.trim(), input.is_enabled, timestamp, input.id);
-  reapplyRulesAcrossTransactions(db);
+  `).run(normalizeRuleText(input.keyword), input.category.trim(), input.is_enabled, timestamp, input.id);
+  const touchedStatementIds =
+    previous
+      ? reapplyRulesForCandidateKeywords(
+          db,
+          [previous.keyword, input.keyword],
+          previous.category,
+          timestamp
+        )
+      : reapplyRulesAcrossTransactions(db);
+  refreshStatementReviewCounts(db, touchedStatementIds, timestamp);
+  refreshProjectsForStatements(db, touchedStatementIds, timestamp);
   return db.prepare("SELECT * FROM rules WHERE id = ?").get(input.id) as RuleRecord;
 }
 
 export function deleteRule(ruleId: string): void {
   const db = getDatabase();
-  db.prepare("DELETE FROM rules WHERE id = ?").run(ruleId);
   const timestamp = nowIso();
-  const unresolvedByStatement = db.prepare("SELECT statement_id, COUNT(*) AS count FROM transactions WHERE status != 'reviewed' GROUP BY statement_id").all() as Array<{ statement_id: string; count: number }>;
-  const updateStatement = db.prepare("UPDATE statements SET review_count = ?, updated_at = ? WHERE id = ?");
-  for (const row of unresolvedByStatement) {
-    updateStatement.run(row.count, timestamp, row.statement_id);
-  }
+  const previous = db.prepare("SELECT * FROM rules WHERE id = ?").get(ruleId) as RuleRecord | undefined;
+  db.prepare("DELETE FROM rules WHERE id = ?").run(ruleId);
+  const touchedStatementIds =
+    previous
+      ? reapplyRulesForCandidateKeywords(db, [previous.keyword], previous.category, timestamp)
+      : reapplyRulesAcrossTransactions(db);
+  refreshStatementReviewCounts(db, touchedStatementIds, timestamp);
+  refreshProjectsForStatements(db, touchedStatementIds, timestamp);
 }
 
 export function listAdjustmentsByProject(projectId: string): AdjustmentRecord[] {
