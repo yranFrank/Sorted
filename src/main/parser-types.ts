@@ -41,6 +41,12 @@ export type ParsedTransaction = {
   transaction_reference: string;
 };
 
+export type KeywordInferenceRule = {
+  keywords: string[];
+  value: string;
+  startsWith?: boolean;
+};
+
 export type StatementAnalysis = {
   filePath: string;
   pages: number;
