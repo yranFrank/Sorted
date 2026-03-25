@@ -2,6 +2,14 @@ import type { RuleRecord, TransactionRecord } from "./types";
 
 export type SummaryMode = "overall" | "monthly" | "custom";
 
+export type ClassificationModel = {
+  selectedTransactions: TransactionRecord[];
+  selectedReviewTransaction: TransactionRecord | null;
+  identifiedTransactions: TransactionRecord[];
+  pendingTransactions: TransactionRecord[];
+  selectedClassifyTransaction: TransactionRecord | null;
+};
+
 export type SummaryGroup = {
   category: string;
   total: number;
@@ -136,6 +144,44 @@ export function deriveAvailableDateRange(transactions: TransactionRecord[]) {
     start: normalizedDates[0] || "",
     end: normalizedDates[normalizedDates.length - 1] || ""
   };
+}
+
+export function buildClassificationModel(input: {
+  transactions: TransactionRecord[];
+  selectedStatementId: string;
+  selectedReviewTransactionId: string;
+  selectedClassifyTransactionId: string;
+}) {
+  const {
+    transactions,
+    selectedStatementId,
+    selectedReviewTransactionId,
+    selectedClassifyTransactionId
+  } = input;
+
+  const selectedTransactions = sortTransactionsByDate(
+    !selectedStatementId
+      ? []
+      : transactions.filter((item) => item.statement_id === selectedStatementId)
+  );
+  const selectedReviewTransaction =
+    selectedTransactions.find((item) => item.id === selectedReviewTransactionId) ||
+    selectedTransactions[0] ||
+    null;
+  const identifiedTransactions = selectedTransactions.filter((item) => item.status === "reviewed");
+  const pendingTransactions = selectedTransactions.filter((item) => item.status !== "reviewed");
+  const selectedClassifyTransaction =
+    pendingTransactions.find((item) => item.id === selectedClassifyTransactionId) ||
+    pendingTransactions[0] ||
+    null;
+
+  return {
+    selectedTransactions,
+    selectedReviewTransaction,
+    identifiedTransactions,
+    pendingTransactions,
+    selectedClassifyTransaction
+  } satisfies ClassificationModel;
 }
 
 export function buildSummaryModel(input: {

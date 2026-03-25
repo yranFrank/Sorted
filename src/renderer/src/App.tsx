@@ -14,6 +14,7 @@ import type {
   TransactionRecord
 } from "./types";
 import {
+  buildClassificationModel,
   buildCategoryRuleMap,
   buildSummaryModel,
   deriveAvailableDateRange,
@@ -21,7 +22,6 @@ import {
   isValidRange,
   rangeLabel,
   safeNumber,
-  sortTransactionsByDate,
   totalByDirection,
   type SummaryMode
 } from "./workspace-selectors";
@@ -578,23 +578,23 @@ export default function App(): JSX.Element {
     setSelectedClassifyTransactionId("");
   }, [selectedId]);
 
-  const selectedTransactions = useMemo(
+  const classificationModel = useMemo(
     () =>
-      sortTransactionsByDate(
-        !selectedId ? [] : workspace.transactions.filter((item) => item.statement_id === selectedId)
-      ),
-    [workspace.transactions, selectedId]
+      buildClassificationModel({
+        transactions: workspace.transactions,
+        selectedStatementId: selectedId,
+        selectedReviewTransactionId,
+        selectedClassifyTransactionId
+      }),
+    [workspace.transactions, selectedId, selectedReviewTransactionId, selectedClassifyTransactionId]
   );
-  const selectedReviewTransaction =
-    selectedTransactions.find((item) => item.id === selectedReviewTransactionId) ||
-    selectedTransactions[0] ||
-    null;
-  const identifiedTransactions = selectedTransactions.filter((item) => item.status === "reviewed");
-  const pendingTransactions = selectedTransactions.filter((item) => item.status !== "reviewed");
-  const selectedClassifyTransaction =
-    pendingTransactions.find((item) => item.id === selectedClassifyTransactionId) ||
-    pendingTransactions[0] ||
-    null;
+  const {
+    selectedTransactions,
+    selectedReviewTransaction,
+    identifiedTransactions,
+    pendingTransactions,
+    selectedClassifyTransaction
+  } = classificationModel;
   const confirmedTransactions = workspace.transactions.filter((item) => item.status === "reviewed");
   const availableMonths = useMemo(
     () => deriveAvailableMonths(confirmedTransactions),
