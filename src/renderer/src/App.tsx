@@ -363,6 +363,7 @@ export default function App(): JSX.Element {
   const [analysisMap, setAnalysisMap] = useState<Record<string, any>>({});
   const [metadataDraft, setMetadataDraft] = useState<MetadataDraft>(readMetadataDraft());
   const [previewStatementId, setPreviewStatementId] = useState("");
+  const [previewEnabledByStatement, setPreviewEnabledByStatement] = useState<Record<string, boolean>>({});
   const [ruleKeywordDrafts, setRuleKeywordDrafts] = useState<Record<string, string>>({});
   const [newCategoryName, setNewCategoryName] = useState("");
   const [selectedReviewTransactionId, setSelectedReviewTransactionId] = useState("");
@@ -390,6 +391,8 @@ export default function App(): JSX.Element {
   const selectedStatement = workspace.statements.find((item) => item.id === selectedId);
   const previewStatement = workspace.statements.find((item) => item.id === previewStatementId);
   const selectedAnalysis = selectedId ? analysisMap[selectedId] : null;
+  const isSelectedPreviewEnabled = selectedStatement ? !!previewEnabledByStatement[selectedStatement.id] : false;
+  const isModalPreviewEnabled = previewStatement ? !!previewEnabledByStatement[previewStatement.id] : false;
 
   async function refreshProjects() {
     setProjects((await window.bankApp.listProjects()) as ProjectRecord[]);
@@ -407,10 +410,15 @@ export default function App(): JSX.Element {
     setPreviewStatementId("");
     setSelectedReviewTransactionId("");
     setSelectedClassifyTransactionId("");
+    setPreviewEnabledByStatement({});
     await loadWorkspace(projectId);
     setPage(nextPage);
     setScreen("workspace");
     setBusy("");
+  }
+
+  function enablePreviewForStatement(statementId: string) {
+    setPreviewEnabledByStatement((previous) => ({ ...previous, [statementId]: true }));
   }
 
   async function createProject() {
@@ -938,6 +946,11 @@ export default function App(): JSX.Element {
               <button className="ghost" onClick={() => setPreviewStatementId("")}>
                 Close
               </button>
+              {!isModalPreviewEnabled ? (
+                <button className="ghost" onClick={() => enablePreviewForStatement(previewStatement.id)}>
+                  Load Preview
+                </button>
+              ) : null}
               <button
                 className="primary"
                 onClick={() => {
@@ -951,7 +964,14 @@ export default function App(): JSX.Element {
               </button>
             </div>
           </div>
-          <PdfPreview filePath={previewStatement.file_path} maxPages={3} />
+          {isModalPreviewEnabled ? (
+            <PdfPreview filePath={previewStatement.file_path} maxPages={3} />
+          ) : (
+            <div className="empty-state subtle-empty">
+              <p>PDF preview is optional.</p>
+              <p className="muted">Load it only when you need to inspect the original statement.</p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -1320,7 +1340,24 @@ export default function App(): JSX.Element {
               <h3>Original File Preview</h3>
               <span className="status-pill">{selectedAnalysis ? selectedAnalysis.pages + " pages" : ""}</span>
             </div>
-            <PdfPreview filePath={selectedStatement.file_path} maxPages={2} />
+            <div className="action-inline">
+              {!isSelectedPreviewEnabled ? (
+                <button className="ghost" onClick={() => enablePreviewForStatement(selectedStatement.id)}>
+                  Load PDF Preview
+                </button>
+              ) : null}
+              <span className="muted">
+                Preview is optional and loads only when needed.
+              </span>
+            </div>
+            {isSelectedPreviewEnabled ? (
+              <PdfPreview filePath={selectedStatement.file_path} maxPages={2} />
+            ) : (
+              <div className="empty-state subtle-empty">
+                <p>PDF preview is currently hidden.</p>
+                <p className="muted">Use the button above to load it when you need the original file.</p>
+              </div>
+            )}
             <div className="raw-list">
               {rawBlocks.map((block, index) => {
                 const hasSelectedMatch = selectedNeedles.some((needle) =>
