@@ -7,6 +7,7 @@ type ClassificationPageProps = {
   identifiedTransactions: TransactionRecord[];
   focusTransaction: TransactionRecord | null;
   focusCategoryOptions: string[];
+  selectedCategory: string;
   focusRuleKeyword: string;
   workspaceRuleCount: number;
   newCategoryName: string;
@@ -20,6 +21,7 @@ type ClassificationPageProps = {
   setPage: (page: "summary") => void;
   setSelectedClassifyTransactionId: (id: string) => void;
   setApplyRuleOnCategorySelect: (value: boolean) => void;
+  setSelectedCategory: (transactionId: string, category: string) => void;
   setRuleKeywordDrafts: (
     updater: (previous: Record<string, string>) => Record<string, string>
   ) => void;
@@ -29,8 +31,7 @@ type ClassificationPageProps = {
     category: string,
     options?: { applyRule?: boolean }
   ) => Promise<void>;
-  saveTransactionUpdate: (transactionId: string, category: string, status: string) => Promise<void>;
-  createRule: (transaction: TransactionRecord) => Promise<void>;
+  createRule: (transaction: TransactionRecord, categoryOverride?: string) => Promise<void>;
   searchTransactionOnGoogle: (transaction?: TransactionRecord | null) => Promise<void>;
   createCategory: (groupName: string) => Promise<void>;
 };
@@ -42,6 +43,7 @@ export function ClassificationPage(props: ClassificationPageProps) {
     identifiedTransactions,
     focusTransaction,
     focusCategoryOptions,
+    selectedCategory,
     focusRuleKeyword,
     workspaceRuleCount,
     newCategoryName,
@@ -55,10 +57,10 @@ export function ClassificationPage(props: ClassificationPageProps) {
     setPage,
     setSelectedClassifyTransactionId,
     setApplyRuleOnCategorySelect,
+    setSelectedCategory,
     setRuleKeywordDrafts,
     setNewCategoryName,
     classifyTransaction,
-    saveTransactionUpdate,
     createRule,
     searchTransactionOnGoogle,
     createCategory
@@ -178,9 +180,9 @@ export function ClassificationPage(props: ClassificationPageProps) {
                       <button
                         className={
                           "ghost classification-action-tile" +
-                          (focusTransaction.category === option ? " classification-action-tile-active" : "")
+                          (selectedCategory === option ? " classification-action-tile-active" : "")
                         }
-                        onClick={() => void classifyTransaction(focusTransaction, option, { applyRule: applyRuleOnCategorySelect })}
+                        onClick={() => setSelectedCategory(focusTransaction.id, option)}
                       >
                         {option}
                       </button>
@@ -193,16 +195,22 @@ export function ClassificationPage(props: ClassificationPageProps) {
                   ))}
                   <div className="classification-action-option">
                     <button
-                      className="ghost classification-action-tile"
-                      onClick={() => void saveTransactionUpdate(focusTransaction.id, "Transfer", "reviewed")}
+                      className={
+                        "ghost classification-action-tile" +
+                        (selectedCategory === "Transfer" ? " classification-action-tile-active" : "")
+                      }
+                      onClick={() => setSelectedCategory(focusTransaction.id, "Transfer")}
                     >
                       Transfer
                     </button>
                   </div>
                   <div className="classification-action-option">
                     <button
-                      className="ghost classification-action-tile"
-                      onClick={() => void saveTransactionUpdate(focusTransaction.id, "Ignored", "reviewed")}
+                      className={
+                        "ghost classification-action-tile" +
+                        (selectedCategory === "Ignored" ? " classification-action-tile-active" : "")
+                      }
+                      onClick={() => setSelectedCategory(focusTransaction.id, "Ignored")}
                     >
                       Ignore
                     </button>
@@ -222,19 +230,23 @@ export function ClassificationPage(props: ClassificationPageProps) {
                     This classification will also create a rule: {focusRuleKeyword || "No keyword available"}
                   </div>
                 ) : null}
+                <p className="muted">
+                  Step 1: choose a category. Step 2: decide whether to apply a rule. Step 3: confirm.
+                </p>
 
                 <div className="classification-inline-tools">
                   <button
                     className="primary"
+                    disabled={selectedCategory === ""}
                     onClick={() =>
                       void classifyTransaction(
                         focusTransaction,
-                        focusTransaction.category || focusCategoryOptions[0] || "Other (Raise concern)",
+                        selectedCategory,
                         { applyRule: applyRuleOnCategorySelect }
                       )
                     }
                   >
-                    Mark Reviewed
+                    Confirm Classification
                   </button>
                   <button className="ghost" onClick={() => void searchTransactionOnGoogle(focusTransaction)}>
                     Search Merchant
@@ -252,10 +264,10 @@ export function ClassificationPage(props: ClassificationPageProps) {
                   />
                   <button
                     className="ghost"
-                    disabled={(focusTransaction.category || "") === ""}
-                    onClick={() => void createRule(focusTransaction)}
+                    disabled={selectedCategory === ""}
+                    onClick={() => void createRule(focusTransaction, selectedCategory)}
                   >
-                    Create Rule From Current Category
+                    Create Rule From Selected Category
                   </button>
                 </div>
                 <p className="muted">

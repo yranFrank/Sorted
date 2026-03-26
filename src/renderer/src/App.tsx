@@ -365,6 +365,7 @@ export default function App(): JSX.Element {
   const [previewStatementId, setPreviewStatementId] = useState("");
   const [previewEnabledByStatement, setPreviewEnabledByStatement] = useState<Record<string, boolean>>({});
   const [ruleKeywordDrafts, setRuleKeywordDrafts] = useState<Record<string, string>>({});
+  const [classificationCategoryDrafts, setClassificationCategoryDrafts] = useState<Record<string, string>>({});
   const [newCategoryName, setNewCategoryName] = useState("");
   const [selectedReviewTransactionId, setSelectedReviewTransactionId] = useState("");
   const [selectedClassifyTransactionId, setSelectedClassifyTransactionId] = useState("");
@@ -411,6 +412,7 @@ export default function App(): JSX.Element {
     setSelectedReviewTransactionId("");
     setSelectedClassifyTransactionId("");
     setPreviewEnabledByStatement({});
+    setClassificationCategoryDrafts({});
     await loadWorkspace(projectId);
     setPage(nextPage);
     setScreen("workspace");
@@ -535,10 +537,11 @@ export default function App(): JSX.Element {
     return true;
   }
 
-  async function createRule(transaction: TransactionRecord) {
-    if ((transaction.category || "") === "") return;
+  async function createRule(transaction: TransactionRecord, categoryOverride?: string) {
+    const category = categoryOverride || transaction.category || "";
+    if (category === "") return;
     setBusy("Saving keyword rule...");
-    const created = await createRuleForTransaction(transaction, transaction.category || "");
+    const created = await createRuleForTransaction(transaction, category);
     if (!created) {
       setBusy("");
       return;
@@ -661,6 +664,7 @@ export default function App(): JSX.Element {
   useEffect(() => {
     setSelectedReviewTransactionId("");
     setSelectedClassifyTransactionId("");
+    setClassificationCategoryDrafts({});
   }, [selectedId]);
 
   const classificationModel = useMemo(
@@ -680,6 +684,10 @@ export default function App(): JSX.Element {
     pendingTransactions,
     selectedClassifyTransaction
   } = classificationModel;
+  const selectedClassifyCategory =
+    selectedClassifyTransaction
+      ? classificationCategoryDrafts[selectedClassifyTransaction.id] || selectedClassifyTransaction.category || ""
+      : "";
   const confirmedTransactions = workspace.transactions.filter((item) => item.status === "reviewed");
   const availableMonths = useMemo(
     () => deriveAvailableMonths(confirmedTransactions),
@@ -1472,6 +1480,7 @@ export default function App(): JSX.Element {
         identifiedTransactions={identifiedTransactions}
         focusTransaction={focusTransaction}
         focusCategoryOptions={focusCategoryOptions}
+        selectedCategory={selectedClassifyCategory}
         focusRuleKeyword={focusRuleKeyword}
         workspaceRuleCount={workspace.rules.length}
         newCategoryName={newCategoryName}
@@ -1485,10 +1494,12 @@ export default function App(): JSX.Element {
         setPage={setPage}
         setSelectedClassifyTransactionId={setSelectedClassifyTransactionId}
         setApplyRuleOnCategorySelect={setApplyRuleOnCategorySelect}
+        setSelectedCategory={(transactionId, category) =>
+          setClassificationCategoryDrafts((previous) => ({ ...previous, [transactionId]: category }))
+        }
         setRuleKeywordDrafts={setRuleKeywordDrafts}
         setNewCategoryName={setNewCategoryName}
         classifyTransaction={classifyTransaction}
-        saveTransactionUpdate={saveTransactionUpdate}
         createRule={createRule}
         searchTransactionOnGoogle={searchTransactionOnGoogle}
         createCategory={createCategory}
