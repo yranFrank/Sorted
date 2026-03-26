@@ -215,11 +215,11 @@ export function ClassificationPage(props: ClassificationPageProps) {
                     checked={applyRuleOnCategorySelect}
                     onChange={(event) => setApplyRuleOnCategorySelect(event.target.checked)}
                   />
-                  <span>Also apply rule to similar</span>
+                  <span>Apply rule to similar for this transaction</span>
                 </label>
                 {applyRuleOnCategorySelect ? (
                   <div className="classification-rule-banner">
-                    Rule Created: {focusRuleKeyword || "No keyword available"}
+                    This classification will also create a rule: {focusRuleKeyword || "No keyword available"}
                   </div>
                 ) : null}
 
@@ -250,10 +250,17 @@ export function ClassificationPage(props: ClassificationPageProps) {
                       setRuleKeywordDrafts((previous) => ({ ...previous, [focusTransaction.id]: event.target.value }))
                     }
                   />
-                  <button className="ghost" onClick={() => void createRule(focusTransaction)}>
-                    Apply Rule to Similar
+                  <button
+                    className="ghost"
+                    disabled={(focusTransaction.category || "") === ""}
+                    onClick={() => void createRule(focusTransaction)}
+                  >
+                    Create Rule From Current Category
                   </button>
                 </div>
+                <p className="muted">
+                  Rule mode resets when you move to a different transaction, so each rule decision is explicit.
+                </p>
               </>
             ) : (
               <div className="empty-state subtle-empty">

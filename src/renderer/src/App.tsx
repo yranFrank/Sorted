@@ -516,16 +516,33 @@ export default function App(): JSX.Element {
     setBusy("");
   }
 
-  async function createRule(transaction: TransactionRecord) {
-    const keyword = (ruleKeywordDrafts[transaction.id] || "").trim();
-    if (keyword === "") return;
-    setBusy("Saving keyword rule...");
+  function resolvedRuleKeyword(transaction: TransactionRecord) {
+    return (ruleKeywordDrafts[transaction.id] || "").trim() || merchantSearchTerm(transaction);
+  }
+
+  async function createRuleForTransaction(transaction: TransactionRecord, categoryOverride?: string) {
+    const keyword = resolvedRuleKeyword(transaction);
+    const category = categoryOverride || transaction.category || "";
+    if (keyword === "" || category === "") return false;
+
     await window.bankApp.createRule({
       keyword,
-      category: transaction.category || "",
+      category,
       match_type: "keyword",
       priority: 100
     });
+
+    return true;
+  }
+
+  async function createRule(transaction: TransactionRecord) {
+    if ((transaction.category || "") === "") return;
+    setBusy("Saving keyword rule...");
+    const created = await createRuleForTransaction(transaction, transaction.category || "");
+    if (!created) {
+      setBusy("");
+      return;
+    }
     await loadWorkspace(activeProjectId);
     setRuleKeywordDrafts((previous) => ({ ...previous, [transaction.id]: "" }));
     setBusy("");
@@ -537,8 +554,7 @@ export default function App(): JSX.Element {
     options?: { applyRule?: boolean }
   ) {
     if (!selectedStatement) return;
-    const nextKeyword = (ruleKeywordDrafts[transaction.id] || "").trim() || merchantSearchTerm(transaction);
-    const shouldApplyRule = Boolean(options?.applyRule && nextKeyword !== "");
+    const shouldApplyRule = Boolean(options?.applyRule && resolvedRuleKeyword(transaction) !== "");
 
     setBusy(shouldApplyRule ? "Saving classification and rule..." : "Saving transaction classification...");
     await window.bankApp.updateTransactionClassifications({
@@ -547,12 +563,7 @@ export default function App(): JSX.Element {
     });
 
     if (shouldApplyRule) {
-      await window.bankApp.createRule({
-        keyword: nextKeyword,
-        category,
-        match_type: "keyword",
-        priority: 100
-      });
+      await createRuleForTransaction(transaction, category);
       setRuleKeywordDrafts((previous) => ({ ...previous, [transaction.id]: "" }));
     }
 
@@ -730,6 +741,10 @@ export default function App(): JSX.Element {
       setSelectedClassifyTransactionId(pendingTransactions[0]?.id || "");
     }
   }, [pendingTransactions, selectedClassifyTransactionId]);
+
+  useEffect(() => {
+    setApplyRuleOnCategorySelect(false);
+  }, [selectedClassifyTransaction?.id]);
 
   useEffect(() => {
     const firstDate = availableDateRange.start;
