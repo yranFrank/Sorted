@@ -19,6 +19,7 @@ import {
   filterTransactionsByRange,
   isValidRange,
   monthKey,
+  normalizeDateValue,
   rangeKey,
   rangeLabel,
   sortTransactionsByDate,
