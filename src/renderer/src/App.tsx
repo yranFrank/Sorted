@@ -26,6 +26,50 @@ import {
   type SummaryMode
 } from "./workspace-selectors";
 
+type WorkspaceErrorBoundaryProps = {
+  resetKey: string;
+  children: React.ReactNode;
+};
+
+type WorkspaceErrorBoundaryState = {
+  error: Error | null;
+};
+
+class WorkspaceErrorBoundary extends React.Component<
+  WorkspaceErrorBoundaryProps,
+  WorkspaceErrorBoundaryState
+> {
+  state: WorkspaceErrorBoundaryState = {
+    error: null
+  };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("Workspace render failed", error, info);
+  }
+
+  componentDidUpdate(previousProps: WorkspaceErrorBoundaryProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error !== null) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <section className="card empty-state">
+          <h3>Workspace failed to render</h3>
+          <p className="muted">{this.state.error.message || "Unknown renderer error"}</p>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url
@@ -869,7 +913,9 @@ export default function App(): JSX.Element {
             <div className="page-width stack-gap">
               {topBar(title, subtitle, actions)}
               {busy === "" ? null : <div className="busy-banner">{busy}</div>}
-              {body}
+              <WorkspaceErrorBoundary resetKey={[screen, page, activeProjectId, selectedId].join("::")}>
+                {body}
+              </WorkspaceErrorBoundary>
             </div>
           </div>
           {previewModal()}
@@ -879,7 +925,7 @@ export default function App(): JSX.Element {
   }
 
   function previewModal() {
-    if (!previewStatement) return null;
+    if (screen !== "workspace" || page !== "import" || !previewStatement) return null;
     return (
       <div className="modal-shell" onClick={() => setPreviewStatementId("")}>
         <div className="modal-card" onClick={(event) => event.stopPropagation()}>
