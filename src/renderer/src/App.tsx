@@ -67,6 +67,20 @@ const emptyWorkspace: WorkspaceData = {
   exportHistory: []
 };
 
+function normalizeWorkspaceData(input: Partial<WorkspaceData> | null | undefined): WorkspaceData {
+  return {
+    statements: Array.isArray(input?.statements) ? input!.statements : [],
+    transactions: Array.isArray(input?.transactions) ? input!.transactions : [],
+    rules: Array.isArray(input?.rules) ? input!.rules : [],
+    categories: {
+      expense: Array.isArray(input?.categories?.expense) ? input!.categories.expense : [],
+      income: Array.isArray(input?.categories?.income) ? input!.categories.income : []
+    },
+    adjustments: Array.isArray(input?.adjustments) ? input!.adjustments : [],
+    exportHistory: Array.isArray(input?.exportHistory) ? input!.exportHistory : []
+  };
+}
+
 const workflowTabs: { key: PageName; label: string; number: string; blurb: string }[] = [
   { key: "import", label: "Import", number: "01", blurb: "Bring statements into the project." },
   { key: "review", label: "Parse", number: "02", blurb: "Verify extraction and fill metadata." },
@@ -338,7 +352,7 @@ export default function App(): JSX.Element {
   }
 
   async function loadWorkspace(projectId: string) {
-    const data = (await window.bankApp.openProject(projectId)) as WorkspaceData;
+    const data = normalizeWorkspaceData((await window.bankApp.openProject(projectId)) as WorkspaceData);
     setWorkspace(data);
     setSelectedId(data.statements[0]?.id || "");
   }
@@ -346,6 +360,9 @@ export default function App(): JSX.Element {
   async function openProject(projectId: string, nextPage: PageName) {
     setBusy("Opening project...");
     setActiveProjectId(projectId);
+    setPreviewStatementId("");
+    setSelectedReviewTransactionId("");
+    setSelectedClassifyTransactionId("");
     await loadWorkspace(projectId);
     setPage(nextPage);
     setScreen("workspace");
@@ -383,9 +400,14 @@ export default function App(): JSX.Element {
   async function ensureAnalysis(statement?: StatementRecord) {
     if (!statement) return null;
     if (analysisMap[statement.id]) return analysisMap[statement.id];
-    const analysis = await window.bankApp.analyzeStatementPreview(statement.file_path);
-    setAnalysisMap((previous) => ({ ...previous, [statement.id]: analysis }));
-    return analysis;
+    try {
+      const analysis = await window.bankApp.analyzeStatementPreview(statement.file_path);
+      setAnalysisMap((previous) => ({ ...previous, [statement.id]: analysis }));
+      return analysis;
+    } catch (error) {
+      console.error("Failed to analyze statement preview", statement.file_path, error);
+      return null;
+    }
   }
 
   async function reparseSelected() {
@@ -565,9 +587,9 @@ export default function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (screen !== "workspace" || !selectedStatement) return;
+    if (screen !== "workspace" || page !== "review" || !selectedStatement) return;
     void ensureAnalysis(selectedStatement);
-  }, [screen, selectedStatement]);
+  }, [screen, page, selectedStatement]);
 
   useEffect(() => {
     setMetadataDraft(readMetadataDraft(selectedStatement, selectedAnalysis));
