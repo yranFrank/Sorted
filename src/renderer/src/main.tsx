@@ -63,18 +63,33 @@ class RootErrorBoundary extends React.Component<
 
 const rootElement = document.getElementById("root") as HTMLElement;
 
-function showFatal(message: string) {
-  rootElement.innerHTML = `
+function escapeHtml(message: string) {
+  return message.replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[char] || char));
+}
+
+function showFatalOverlay(message: string) {
+  let overlay = document.getElementById("fatal-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "fatal-overlay";
+    overlay.style.position = "fixed";
+    overlay.style.inset = "0";
+    overlay.style.zIndex = "99999";
+    overlay.style.overflow = "auto";
+    document.body.appendChild(overlay);
+  }
+
+  overlay.innerHTML = `
     <div style="min-height:100vh;padding:32px;background:#f5f1ea;color:#111;font-family:Segoe UI,sans-serif;">
       <h1 style="margin:0 0 12px;">Startup failed</h1>
-      <pre style="white-space:pre-wrap;word-break:break-word;padding:16px;background:#fff;border:1px solid rgba(0,0,0,0.12);border-radius:12px;">${message.replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[char] || char))}</pre>
+      <pre style="white-space:pre-wrap;word-break:break-word;padding:16px;background:#fff;border:1px solid rgba(0,0,0,0.12);border-radius:12px;">${escapeHtml(message)}</pre>
     </div>
   `;
 }
 
 window.addEventListener("error", (event) => {
   console.error("Unhandled window error", event.error || event.message);
-  showFatal(String(event.error?.stack || event.error?.message || event.message || "Unknown error"));
+  showFatalOverlay(String(event.error?.stack || event.error?.message || event.message || "Unknown error"));
 });
 
 window.addEventListener("unhandledrejection", (event) => {
@@ -85,7 +100,7 @@ window.addEventListener("unhandledrejection", (event) => {
       : typeof event.reason === "string"
         ? event.reason
         : JSON.stringify(event.reason, null, 2);
-  showFatal(reason || "Unhandled promise rejection");
+  showFatalOverlay(reason || "Unhandled promise rejection");
 });
 
 ReactDOM.createRoot(rootElement).render(
